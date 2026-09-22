@@ -1,6 +1,7 @@
 """MusicBrainz, Cover Art Archive and AcoustID code, with every
 network call faked out."""
 
+import argparse
 import io
 from argparse import Namespace
 from types import SimpleNamespace
@@ -285,3 +286,47 @@ def test_apply_album_art_keeps_existing(mmf, tmp_path, capsys):
     assert (root / "A" / "Has Art" / "art.jpg").read_bytes() == b"mine"
     assert (root / "A" / "No Art" / "art.jpg").read_bytes() == b"new"
     assert "Keeping existing album art" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["art.jpg", "cover.PNG", "folder.webp"])
+def test_art_filename_accepts(mmf, name):
+    assert mmf.art_filename(name) == name
+
+
+@pytest.mark.parametrize("name, error", [
+    ("dir/art.jpg", "plain filename"), ("", "plain filename"),
+    ("cover", "no image extension"), ("cover.xyz", "can't save '.xyz'"),
+])
+def test_art_filename_rejects(mmf, name, error):
+    with pytest.raises(argparse.ArgumentTypeError, match=error):
+        mmf.art_filename(name)
+
+
+@pytest.mark.parametrize("name, fmt", [
+    ("art.jpg", "JPEG"), ("cover.png", "PNG"), ("folder.webp", "WEBP"),
+])
+def test_album_art_format_follows_extension(mmf, fake_mb, monkeypatch,
+                                            tmp_path, name, fmt):
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(mmf, "fetch_cover_art", lambda _id: jpeg_bytes())
+    mmf.download_album_art("A", "B", tmp_path, name)
+    with Image.open(tmp_path / name) as image:
+        assert image.format == fmt
+
+
+@needs_ffmpeg
+def test_scan_with_custom_art_filename(mmf, fake_mb, monkeypatch,
+                                       tmp_path):
+    monkeypatch.setattr(mmf, "fetch_cover_art", lambda _id: jpeg_bytes())
+    root = tmp_path / "root"
+    make_audio(root / "A" / "Has Cover" / "01 - x.mp3")
+    make_audio(root / "A" / "No Cover" / "01 - y.mp3")
+    (root / "A" / "Has Cover" / "cover.png").write_bytes(b"mine")
+    art_dir = tmp_path / "art"
+    mmf.run_scan(Namespace(
+        root=str(root), queue=str(tmp_path / "q.yml"), no_art=False,
+        art_dir=str(art_dir), art_filename="cover.png",
+        musicbrainz_contact="me@example.com", no_musicbrainz=True,
+    ))
+    assert sorted(p.relative_to(art_dir).as_posix()
+                  for p in art_dir.rglob("*.*")) == ["A/No Cover/cover.png"]

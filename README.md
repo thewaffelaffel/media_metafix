@@ -73,8 +73,10 @@ Other steps (run any step with `-h` for its options):
 - **TMF `fingerprint`** looks files up by their OpenSubtitles hash. No
   free service fingerprints video content, so only unmodified copies of
   known releases are identified; re-encoded files show as "unknown".
-- **Album art** is only downloaded for albums without an `art.jpg`,
-  and `apply` never replaces an existing one.
+- **Album art** is saved as `art.jpg`; `scan --art-filename cover.png`
+  picks another name, and its extension sets the image format. Art is
+  only downloaded for albums without a file of that name, and `apply`
+  never replaces an existing one.
 - **Subtitles** are English by default; `scan --sub-lang fr` (or any
   OpenSubtitles code, like `pt-BR`) picks another language, and
   `--no-captions` skips them. `scan` checks the code with OpenSubtitles

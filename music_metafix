@@ -17,6 +17,7 @@ from every step.
 See README.md for setup and examples.
 """
 
+import argparse
 import io
 import os
 import re
@@ -322,10 +323,35 @@ def fetch_cover_art(release_id):
         return response.read()
 
 
+def image_format(filename):
+    """Pillow's format for saving `filename` ("cover.png" -> "PNG"),
+    or None if it can't write that extension."""
+    fmt = Image.registered_extensions().get(Path(filename).suffix.lower())
+    return fmt if fmt in Image.SAVE else None
+
+
+def art_filename(text):
+    """argparse type: a plain filename Pillow can save, e.g.
+    cover.png."""
+    name = text.strip()
+    if not name or Path(name).name != name:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} isn't a plain filename (e.g. cover.jpg)")
+    suffix = Path(name).suffix
+    if not suffix:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} has no image extension (e.g. cover.jpg)")
+    if Image is not None and image_format(name) is None:
+        raise argparse.ArgumentTypeError(
+            f"can't save {suffix!r} images; try .jpg or .png")
+    return name
+
+
 def save_album_art(image_bytes, dest_path):
+    """Resize the art and save it in the format its name implies."""
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image = image.resize(ALBUM_ART_SIZE, Image.LANCZOS)
-    image.save(dest_path, "JPEG")
+    image.save(dest_path, image_format(dest_path.name))
 
 
 def download_album_art(artist_name, album_name, dest_dir, filename):
@@ -867,8 +893,10 @@ def add_album_art_args(scan_p):
     add_dir_arg(scan_p, "--art-dir", DEFAULT_ART_DIR,
                 "Where to save downloaded album art")
     scan_p.add_argument(
-        "--art-filename", default=ALBUM_ART_FILENAME,
-        help="Album art filename (default: %(default)s)",
+        "--art-filename", default=ALBUM_ART_FILENAME, type=art_filename,
+        help="Album art filename; its extension sets the image format, "
+             "and albums that already have it are skipped "
+             "(default: %(default)s)",
     )
 
 
