@@ -6,42 +6,77 @@ Verify and fix metadata for a music library laid out as
 Artist/album are trusted from the folder structure. Title and track
 number come from a MusicBrainz text search on that artist/album,
 matched to the filename by track number or (failing that) fuzzy title.
-AcoustID audio fingerprinting is a fallback for files that search can't
-place -- fingerprints alone can't tell apart similar-sounding versions
-of a song (e.g. instrumental vs. vocal) as reliably as the match above.
 
 The recording's full artist credit (main + featured artists) is written
 to a separate "artists" tag; the folder-trusted "artist" tag is untouched.
 
-Recognition is slow and rate-limited, so nothing is written directly --
-changes are queued to a YAML file for review, optionally sanity-checked
-with --check, then applied with --apply. Neither calls the APIs.
+This is a multi-step pipeline, each step run as its own subcommand:
 
---album-art is a separate mode: for each album, finds its MusicBrainz
-release, fetches the cover from the Cover Art Archive, scales it to
-300x300, and saves it as "art.jpg" (or a given filename), overwriting
-any existing file.
+    scan <root>         Search MusicBrainz and queue metadata changes
+                         for review (see below). Also queues fresh
+                         album art for inspection, unless --no-art.
+    check [queue]        Sanity-check a queued changes file for likely
+                         mistakes, interactively asking what to do
+                         about each one found.
+    fingerprint <root>   Audio-fingerprint every queued file with
+                         AcoustID as a sanity check that its queued
+                         title roughly matches the actual recording.
+                         Just prints mismatches -- no prompts.
+    apply <root>         Apply a queued changes file's metadata (and
+                         any queued album art) to the files on disk.
+    normalize <root>     Loudness-normalize every track under root to
+                         a consistent volume.
+    convert <root> <from> <to>
+                         Re-encode every file of extension <from> in
+                         root to <to>, preserving metadata.
+    rename <root> <format>
+                         Rename files under root from a template
+                         rendered from their current tags.
+
+Recognition is slow and rate-limited, so scan never writes directly --
+changes are queued to a YAML file for review, optionally sanity-checked
+with `check` and `fingerprint`, then written to disk with `apply`.
+Neither `check` nor `fingerprint` call the MusicBrainz/AcoustID APIs
+for anything other than `fingerprint`'s own fingerprint lookups.
+
+Working files (the changes queue, queued album art, and backups) live
+under a "tmp" directory alongside wherever the script is run from --
+NOT inside root. Because of this, `scan` stamps the queue file with
+root's absolute path, and `apply` refuses to run if that doesn't match
+the root it was given.
+
+Before any step that modifies root's files (apply, normalize, convert,
+rename), a compressed backup of root is made in tmp/backups, unless
+--no-backup is given.
 
 A ".mmfignore" file in root (".gitignore" syntax) excludes matching
-files/folders from every pass.
+files/folders from every step, including backups.
 
 Setup:
     pip install mutagen pyacoustid musicbrainzngs pyyaml pillow pathspec
-    # provides `fpcalc`, used by pyacoustid:
+    # provides `fpcalc`, used by pyacoustid (needed for `fingerprint`):
     sudo apt install libchromaprint-tools
+    # needed for `normalize` and `convert`:
+    sudo apt install ffmpeg
 
-    # Get a free AcoustID API key (no cost, just a signup):
+    # Get a free AcoustID API key (no cost, just a signup), needed for
+    # `fingerprint`:
     # https://acoustid.org/new-application
     export MMF_ACOUSTID_API_KEY=your_key_here
 
 Usage:
-    music_metafix /path/to/music/root
-    music_metafix --check temp/changes.yml
-    music_metafix /path/to/music/root --apply temp/changes.yml
-    music_metafix /path/to/music/root --rename "%num - %title"
-    music_metafix /path/to/music/root --album-art [filename]
+    music_metafix scan /path/to/music/root
+    music_metafix scan /path/to/music/root --no-art
+    music_metafix check
+    music_metafix check tmp/changes.yml
+    music_metafix fingerprint /path/to/music/root
+    music_metafix apply /path/to/music/root
+    music_metafix normalize /path/to/music/root
+    music_metafix convert /path/to/music/root wma mp3
+    music_metafix rename /path/to/music/root "%num - %title"
 
-Queue file paths are relative to root, so --apply needs the same root.
+Queue file paths are relative to root, so `check`/`fingerprint`/`apply`
+need the same root `scan` was given.
 """
 
 import argparse
@@ -50,8 +85,11 @@ import io
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tarfile
+from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -98,6 +136,12 @@ CHECK_OPTIONS = {
 LINE_JUMP_EDITORS = {
     "vi", "vim", "nvim", "gvim", "mvim", "nano", "pico", "emacs"
 }
+
+# Working directory for the changes queue, queued album art, and
+# backups. Relative to wherever the script is run from -- NOT root.
+DEFAULT_TMP_DIR = "tmp"
+DEFAULT_QUEUE_FILE = str(Path(DEFAULT_TMP_DIR) / "changes.yml")
+DEFAULT_ART_DIR = str(Path(DEFAULT_TMP_DIR) / "art")
 
 
 def warn(msg):
@@ -319,96 +363,10 @@ def render_filename(template, path, final_tags):
 
 
 # ---------------------------------------------------------------------------
-# Recognition: MusicBrainz text search (primary), AcoustID audio
-# fingerprinting (fallback).
+# Recognition: MusicBrainz text search.
 # ---------------------------------------------------------------------------
 
 MIN_ACOUSTID_SCORE = 0.6       # AcoustID's own match score (0-1)
-MIN_CONFIDENCE = 0.5           # blended confidence before trusting a match
-
-
-def acoustid_artist_credit(artists):
-    """Join an AcoustID artist-credit list into a display string (with
-    joinphrases) plus a plain list of names. (None, []) if empty."""
-    if not artists:
-        return None, []
-    name = "".join(a["name"] + a.get("joinphrase", "") for a in artists)
-    names = [a["name"] for a in artists]
-    return name, names
-
-
-def best_release_match(recording, folder_album):
-    """Find the release group whose title best matches `folder_album`
-    and return (track_no, track_total, album_conf) for `recording`'s
-    position in it (None/0.0 if not found)."""
-    track_no = track_total = None
-    album_conf = 0.0
-    for release_group in recording.get("releasegroups", []):
-        for release in release_group.get("releases", []):
-            release_conf = fuzzy_ratio(release.get("title"), folder_album)
-            if release_conf <= album_conf:
-                continue
-            for medium in release.get("mediums", []):
-                for track in medium.get("tracks", []):
-                    same_recording = track.get("id") == recording.get("id")
-                    same_title = (
-                        fuzzy_ratio(track.get("title"), recording.get("title"))
-                        > 0.9
-                    )
-                    if same_recording or same_title:
-                        album_conf = release_conf
-                        track_no = track.get("position")
-                        track_total = medium.get("track_count")
-    return track_no, track_total, album_conf
-
-
-def recognize_via_acoustid(path, api_key, folder_artist, folder_album):
-    """Fingerprint and look up `path`. Returns a title/tracknumber/
-    track_total/confidence dict, or None if nothing confident."""
-    duration, fp = acoustid.fingerprint_file(str(path))
-    response = acoustid.lookup(
-        api_key, fp, duration,
-        meta=["recordings", "releasegroups", "releases", "tracks", "compress"],
-    )
-    if response.get("status") != "ok":
-        message = response.get("error", {}).get("message", "unknown error")
-        raise acoustid.WebServiceError(message)
-
-    best = None  # (confidence, title, track_no, track_total, artist_names)
-    results = sorted(
-        response.get("results", []),
-        key=lambda r: r.get("score", 0), reverse=True,
-    )
-    for result in results:
-        score = result.get("score", 0)
-        if score < MIN_ACOUSTID_SCORE:
-            continue
-        for recording in result.get("recordings", []):
-            title = recording.get("title")
-            if not title:
-                continue
-
-            artist_name, artist_names = acoustid_artist_credit(
-                recording.get("artists"),
-            )
-            artist_conf = (
-                fuzzy_ratio(artist_name, folder_artist) if artist_name else 0.3
-            )
-            track_no, track_total, album_conf = best_release_match(
-                recording, folder_album,
-            )
-
-            confidence = score * 0.5 + artist_conf * 0.3 + album_conf * 0.2
-            if best is None or confidence > best[0]:
-                best = (confidence, title, track_no, track_total, artist_names)
-
-    if best is None or best[0] < MIN_CONFIDENCE:
-        return None
-    confidence, title, track_no, track_total, artist_names = best
-    return {
-        "title": title, "tracknumber": track_no, "track_total": track_total,
-        "confidence": confidence, "artists": artist_names,
-    }
 
 
 def recognize_via_musicbrainz_text(folder_artist, folder_album):
@@ -439,7 +397,8 @@ def recognize_via_musicbrainz_text(folder_artist, folder_album):
 
 
 # ---------------------------------------------------------------------------
-# Album art: MusicBrainz + Cover Art Archive, saved straight to disk.
+# Album art: MusicBrainz + Cover Art Archive. `scan` downloads it into a
+# tmp/art queue for review; `apply` copies it onto the real album dirs.
 # ---------------------------------------------------------------------------
 
 ALBUM_ART_FILENAME = "art.jpg"
@@ -472,10 +431,11 @@ def save_album_art(image_bytes, dest_path):
     image.save(dest_path, "JPEG")
 
 
-def download_album_art(artist_name, album_name, album_dir, filename):
-    """Fetch cover art into <album_dir>/<filename>. Errors are logged
+def download_album_art(artist_name, album_name, dest_dir, filename):
+    """Fetch cover art into <dest_dir>/<filename>. Errors are logged
     and skipped, never raised."""
-    art_path = album_dir / filename
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    art_path = dest_dir / filename
     album_key = f"{artist_name}/{album_name}"
 
     try:
@@ -500,7 +460,7 @@ def download_album_art(artist_name, album_name, album_dir, filename):
 
 
 # ---------------------------------------------------------------------------
-# Main pass
+# Shared root-walking / ignore-file plumbing
 # ---------------------------------------------------------------------------
 
 AUDIO_EXTENSIONS = {
@@ -508,49 +468,6 @@ AUDIO_EXTENSIONS = {
 }
 
 MMFIGNORE_FILENAME = ".mmfignore"
-
-FUZZY_SAME_ENOUGH = 0.92       # strings this similar count as "already correct"
-FUZZY_MATCH_THRESHOLD = 0.6    # min similarity to accept a text-search match
-TITLE_CHAR_DIFF_THRESHOLD = 3   # max chars for a filename/title to match
-
-QUEUE_FIELDS = ("album", "artist", "artists", "title", "tracknumber")
-
-QUEUE_HEADER = """\
-# Music metadata changes queue.
-#
-# Review and edit the fields below as needed, then apply with:
-#   {script} {root} --apply {queue}
-#
-# Delete a field to skip just that change, or remove a whole file's entry
-# to skip that file entirely. File paths (relative to root) are the keys.
-# A "# was: ..." comment shows the field's previous value, where it had one.
-
-"""
-
-# (key, label, normalizer) for check_duplicate_fields's per-field checks.
-DUPLICATE_FIELD_CHECKS = (
-    ("title", "title", lambda v: str(v).strip().casefold()),
-    ("tracknumber", "track number", normalize_track),
-)
-
-
-class RestartCheck(Exception):
-    """Raised to resolve a warning by hand: pending changes are
-    flushed, an editor opens on the queue file at `line`, and the
-    whole check restarts from a fresh read."""
-
-    def __init__(self, line=None):
-        super().__init__()
-        self.line = line
-
-
-class CheckStats:
-    """Mutable counters threaded through run_check's check_* helpers."""
-
-    def __init__(self):
-        self.warnings = 0
-        self.resolved = 0
-        self.changed = False
 
 
 def load_mmfignore(root):
@@ -603,6 +520,55 @@ def iter_music_files(root):
                 yield artist_name, album_name, song_path
 
 
+def iter_music_files_of_ext(root, ext):
+    for artist_name, album_name, path in iter_music_files(root):
+        if path.suffix.lower() == ext:
+            yield artist_name, album_name, path
+
+
+def iter_non_ignored_files(root, spec):
+    """Depth-first walk of every non-ignored file under root, skipping
+    whole ignored directories rather than just filtering their files."""
+    root = Path(root)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for entry in sorted(current.iterdir()):
+            if is_ignored(spec, root, entry):
+                continue
+            if entry.is_dir():
+                stack.append(entry)
+            else:
+                yield entry
+
+
+# ---------------------------------------------------------------------------
+# Backups: taken before any step that modifies root, unless --no-backup.
+# ---------------------------------------------------------------------------
+
+def create_backup(root, tmp_dir):
+    root = Path(root)
+    spec = load_mmfignore(root)
+    backups_dir = Path(tmp_dir) / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = backups_dir / f"{root.name}-{timestamp}.tar.gz"
+    with tarfile.open(backup_path, "w:gz") as tar:
+        for path in iter_non_ignored_files(root, spec):
+            tar.add(path, arcname=str(path.relative_to(root)))
+    print(f"Backup created: {backup_path}")
+    return backup_path
+
+
+def maybe_backup(args, root):
+    if not args.no_backup:
+        create_backup(root, args.tmp_dir)
+
+
+# ---------------------------------------------------------------------------
+# rename
+# ---------------------------------------------------------------------------
+
 def run_rename(root, template):
     """Rename every music file under root to `template`, rendered
     from its current on-disk tags."""
@@ -632,6 +598,11 @@ def run_rename(root, template):
         print(f"Renamed: {path.name} -> {new_name}")
 
 
+def run_rename_step(args):
+    maybe_backup(args, Path(args.root))
+    run_rename(args.root, args.template)
+
+
 def configure_musicbrainz(contact):
     """Set musicbrainzngs's user-agent. Returns False if the package
     isn't installed (caller prints its own "not installed" note)."""
@@ -641,24 +612,9 @@ def configure_musicbrainz(contact):
     return True
 
 
-def run_album_art(root, filename, contact):
-    """Download/overwrite <filename> for every album under root."""
-    if not configure_musicbrainz(contact):
-        missing_package(
-            "musicbrainzngs", "musicbrainzngs", "can't download album art.",
-        )
-        return
-    if Image is None:
-        missing_package("Pillow", "pillow", "can't download album art.")
-        return
-
-    root = Path(root)
-    spec = load_mmfignore(root)
-    for artist_name, album_name, album_dir in iter_albums(root, spec):
-        if is_ignored(spec, root, album_dir / filename):
-            continue
-        download_album_art(artist_name, album_name, album_dir, filename)
-
+# ---------------------------------------------------------------------------
+# scan: MusicBrainz text search + queued album art
+# ---------------------------------------------------------------------------
 
 def render_yaml_scalar(value):
     """Render `value` as a single-line flow-style YAML scalar."""
@@ -748,55 +704,8 @@ def match_via_musicbrainz(
     return True
 
 
-def match_via_acoustid(updates, current, path, artist_name, album_name, args):
-    """Try AcoustID fingerprinting as a last resort, queuing title/
-    tracknumber/artists updates on a confident match. Returns True if
-    matched. Clears args.acoustid_api_key on a backend/web-service
-    error, disabling AcoustID for the rest of the run."""
-    if not acoustid or not args.acoustid_api_key:
-        return False
-
-    recognized = None
-    try:
-        recognized = recognize_via_acoustid(
-            path, args.acoustid_api_key, artist_name, album_name,
-        )
-    except acoustid.NoBackendError:
-        warn(
-            "fpcalc/chromaprint not found -- install "
-            "libchromaprint-tools. Disabling AcoustID for the rest "
-            "of this run."
-        )
-        args.acoustid_api_key = None
-    except acoustid.WebServiceError as exc:
-        warn(
-            f"AcoustID web service error, disabling AcoustID for "
-            f"the rest of this run: {exc}"
-        )
-        args.acoustid_api_key = None
-    except acoustid.AcoustidError as exc:
-        warn(f"AcoustID lookup failed for {path.name}: {exc}")
-
-    if not recognized:
-        return False
-
-    if should_replace_title(recognized["title"], current.get("title")):
-        updates["title"] = recognized["title"]
-    if recognized["tracknumber"]:
-        new_track = str(recognized["tracknumber"])
-        if recognized.get("track_total"):
-            new_track += f"/{recognized['track_total']}"
-        old_track = normalize_track(current.get("tracknumber"))
-        if normalize_track(new_track) != old_track:
-            updates["tracknumber"] = new_track
-    new_artists = recognized.get("artists")
-    if should_replace_artists(new_artists, current.get("artists")):
-        updates["artists"] = new_artists
-    return True
-
-
 def build_queue_fields(current, updates):
-    """Build the (fields, previous) pair compute_change returns:
+    """Build the (fields, previous) pair compute_scan_change returns:
     `fields` has every QUEUE_FIELDS key, falling back to the current
     tag value where `updates` has none; `previous` holds the prior
     value for keys that are actually changing."""
@@ -814,9 +723,11 @@ def build_queue_fields(current, updates):
     return fields, previous
 
 
-def compute_change(root, artist_name, album_name, path, args, mb_cache):
+def compute_scan_change(root, artist_name, album_name, path, args, mb_cache):
     """Work out what (if anything) should change for `path`. Read-only.
-    Returns None, or (file, fields, previous) -- see build_queue_fields."""
+    Returns None, or (file, fields, previous) -- see build_queue_fields.
+    No AcoustID fallback: if MusicBrainz can't place the file, a
+    warning is printed and the scan moves on."""
     handle = load_track(path)
     if handle is None:
         raise RuntimeError("could not read tags")
@@ -832,11 +743,8 @@ def compute_change(root, artist_name, album_name, path, args, mb_cache):
         updates, current, artist_name, album_name,
         filename_track, filename_title, args, mb_cache,
     )
-
     if not matched:
-        match_via_acoustid(
-            updates, current, path, artist_name, album_name, args,
-        )
+        warn(f"No MusicBrainz match found for {path}")
 
     # Last resort: the filename alone gives a track number.
     if "tracknumber" not in updates and filename_track is not None \
@@ -848,6 +756,274 @@ def compute_change(root, artist_name, album_name, path, args, mb_cache):
 
     fields, previous = build_queue_fields(current, updates)
     return str(path.relative_to(root)), fields, previous
+
+
+def print_change(file, fields):
+    """Print one file's pending changes to stdout."""
+    print(file)
+    for key in QUEUE_FIELDS:
+        print(f"    {key}: {fields[key]!r}")
+
+
+def write_queue_entry(queue_f, file, fields, previous):
+    """Append one file's changes to the queue file, flushed +
+    fsynced so a crash mid-run doesn't lose prior results."""
+    queue_f.write(f"{render_yaml_scalar(file)}:\n")
+    for key, value in fields.items():
+        line = f"  {key}: {render_yaml_scalar(value)}"
+        if previous.get(key):
+            line += f"  # was: {render_yaml_scalar(previous[key])}"
+        queue_f.write(line + "\n")
+    queue_f.flush()
+    os.fsync(queue_f.fileno())
+
+
+def run_album_art_queue(root, art_dir, filename, contact):
+    """Download fresh cover art for every album under root into
+    art_dir/<artist>/<album>/<filename>, for later review and
+    application via `apply`."""
+    if not configure_musicbrainz(contact):
+        missing_package(
+            "musicbrainzngs", "musicbrainzngs", "can't download album art.",
+        )
+        return
+    if Image is None:
+        missing_package("Pillow", "pillow", "can't download album art.")
+        return
+
+    root = Path(root)
+    art_dir = Path(art_dir)
+    spec = load_mmfignore(root)
+    for artist_name, album_name, album_dir in iter_albums(root, spec):
+        if is_ignored(spec, root, album_dir):
+            continue
+        dest_dir = art_dir / artist_name / album_name
+        download_album_art(artist_name, album_name, dest_dir, filename)
+
+
+def warn_missing_scan_deps(args):
+    """Note any missing/unconfigured MusicBrainz dependency."""
+    if not configure_musicbrainz(args.musicbrainz_contact):
+        missing_package(
+            "musicbrainzngs", "musicbrainzngs",
+            "text-search recognition disabled.",
+        )
+
+
+def run_scan(args):
+    """Scan every music file under root and queue pending changes for
+    review, plus fresh album art (unless --no-art)."""
+    warn_missing_scan_deps(args)
+
+    root = Path(args.root)
+    counts = {"queued": 0, "ok": 0, "error": 0}
+    mb_cache = {}
+
+    queue_path = Path(args.queue)
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(queue_path, "w", encoding="utf-8") as queue_f:
+        queue_f.write(f"# root: {root.resolve()}\n")
+        queue_f.write(QUEUE_HEADER.format(
+            script=sys.argv[0], root=args.root, queue=args.queue,
+        ))
+        queue_f.flush()
+
+        for artist_name, album_name, path in iter_music_files(args.root):
+            try:
+                entry = compute_scan_change(
+                    args.root, artist_name, album_name, path, args, mb_cache,
+                )
+            except Exception as exc:
+                warn(f"Unexpected error on {path}: {exc}")
+                counts["error"] += 1
+                continue
+
+            if entry is None:
+                print(f"{path}: OK")
+                counts["ok"] += 1
+                continue
+
+            file, fields, previous = entry
+            print_change(file, fields)
+            write_queue_entry(queue_f, file, fields, previous)
+            counts["queued"] += 1
+
+    if not args.no_art:
+        run_album_art_queue(
+            args.root, args.art_dir, args.art_filename,
+            args.musicbrainz_contact,
+        )
+
+    if counts["queued"]:
+        print(f"\n{counts['queued']} pending change(s) written to {args.queue}")
+        print(
+            "Review it, then optionally:\n"
+            f"  {sys.argv[0]} check {args.queue}\n"
+            f"  {sys.argv[0]} fingerprint {args.root} --queue {args.queue}\n"
+            "then apply with:\n"
+            f"  {sys.argv[0]} apply {args.root} --queue {args.queue}"
+        )
+    else:
+        print("\nNo changes needed.")
+    print(f"({counts['ok']} already correct, {counts['error']} errors)")
+
+
+# ---------------------------------------------------------------------------
+# fingerprint: AcoustID sanity check on the title scan queued
+# ---------------------------------------------------------------------------
+
+FINGERPRINT_TITLE_THRESHOLD = 0.5   # deliberately low -- just a sanity check
+
+# Strips a trailing parenthesized/bracketed qualifier, e.g.
+# "Reckoner (Live)" -> "Reckoner", repeated to also catch "Song (Live) [Remaster]".
+TITLE_VARIATION_RE = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*$")
+
+
+def strip_title_variations(title):
+    text = title.strip()
+    while True:
+        stripped = TITLE_VARIATION_RE.sub("", text).strip()
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def acoustid_recording_titles(path, api_key):
+    """Fingerprint `path` and return every recording title AcoustID
+    offers with at least MIN_ACOUSTID_SCORE confidence."""
+    duration, fp = acoustid.fingerprint_file(str(path))
+    response = acoustid.lookup(api_key, fp, duration, meta=["recordings"])
+    if response.get("status") != "ok":
+        message = response.get("error", {}).get("message", "unknown error")
+        raise acoustid.WebServiceError(message)
+
+    titles = []
+    for result in response.get("results", []):
+        if result.get("score", 0) < MIN_ACOUSTID_SCORE:
+            continue
+        for recording in result.get("recordings", []):
+            title = recording.get("title")
+            if title:
+                titles.append(title)
+    return titles
+
+
+def check_fingerprint_title(path, api_key, queued_title):
+    """Return (ok, best_title, best_score): ok is None if AcoustID had
+    nothing to compare against, else whether the best candidate title
+    is a close enough (if rough) match for `queued_title`."""
+    titles = acoustid_recording_titles(path, api_key)
+    if not titles:
+        return None, None, 0.0
+
+    target = strip_title_variations(queued_title)
+    best_title, best_score = None, 0.0
+    for title in titles:
+        score = fuzzy_ratio(strip_title_variations(title), target)
+        if score > best_score:
+            best_score, best_title = score, title
+    return best_score >= FINGERPRINT_TITLE_THRESHOLD, best_title, best_score
+
+
+def run_fingerprint(args):
+    """Fingerprint every file in the queue and warn (without
+    prompting) about any whose queued title doesn't roughly match
+    what AcoustID hears."""
+    if not acoustid:
+        missing_package("pyacoustid", "pyacoustid", "can't fingerprint.")
+        return
+    if not args.acoustid_api_key:
+        note(
+            "no AcoustID API key set (--acoustid-api-key or "
+            "$MMF_ACOUSTID_API_KEY) -- can't fingerprint."
+        )
+        return
+
+    root = Path(args.root)
+    with open(args.queue, encoding="utf-8") as f:
+        entries = yaml.safe_load(f) or {}
+
+    counts = {"checked": 0, "mismatch": 0, "skipped": 0}
+    for file, fields in entries.items():
+        title = fields.get("title")
+        if not title:
+            counts["skipped"] += 1
+            continue
+
+        path = root / file
+        if not path.exists():
+            warn(f"File not found, skipping: {path}")
+            counts["skipped"] += 1
+            continue
+
+        try:
+            ok, best_title, best_score = check_fingerprint_title(
+                path, args.acoustid_api_key, str(title),
+            )
+        except acoustid.NoBackendError:
+            warn(
+                "fpcalc/chromaprint not found -- install "
+                "libchromaprint-tools. Aborting fingerprint check."
+            )
+            return
+        except acoustid.WebServiceError as exc:
+            warn(
+                f"AcoustID web service error, aborting fingerprint "
+                f"check: {exc}"
+            )
+            return
+        except acoustid.AcoustidError as exc:
+            warn(f"AcoustID lookup failed for {path.name}: {exc}")
+            counts["skipped"] += 1
+            continue
+
+        counts["checked"] += 1
+        if ok is None:
+            warn(f"{file}: no AcoustID fingerprint match found for this file.")
+        elif not ok:
+            counts["mismatch"] += 1
+            warn(
+                f"{file}: queued title {title!r} doesn't match fingerprint "
+                f"(closest: {best_title!r}, similarity {best_score:.2f})"
+            )
+
+    print(
+        f"\n{counts['checked']} track(s) fingerprinted, "
+        f"{counts['mismatch']} mismatch(es), {counts['skipped']} skipped."
+    )
+
+
+# ---------------------------------------------------------------------------
+# apply
+# ---------------------------------------------------------------------------
+
+ROOT_HEADER_RE = re.compile(r"^#\s*root:\s*(.+?)\s*$")
+
+
+def read_root_header(queue_file):
+    """The root path `scan` stamped at the top of `queue_file`, or
+    None if it's missing (e.g. a hand-written queue file)."""
+    with open(queue_file, encoding="utf-8") as f:
+        first_line = f.readline()
+    match = ROOT_HEADER_RE.match(first_line)
+    return match.group(1) if match else None
+
+
+def verify_queue_root(queue_file, root):
+    """Abort if `queue_file` was scanned against a different root than
+    the one `apply` is being run with."""
+    stored_root = read_root_header(queue_file)
+    if stored_root is None:
+        warn(f"{queue_file} has no recorded root -- skipping root check.")
+        return
+    resolved_root = str(Path(root).resolve())
+    if stored_root != resolved_root:
+        print(
+            f"Error: {queue_file} was scanned for root {stored_root!r}, "
+            f"but apply was given root {resolved_root!r}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def queue_fields_to_tag_updates(fields):
@@ -907,6 +1083,194 @@ def apply_queue(root, queue_file):
         f"\nDone. {counts['applied']} applied, {counts['error']} errors, "
         f"{counts['ignored']} ignored."
     )
+
+
+def apply_album_art(root, art_dir):
+    """Copy every queued album art file from art_dir onto its matching
+    album under root, overwriting any existing file. Returns the
+    number of files applied."""
+    root = Path(root)
+    art_dir = Path(art_dir)
+    if not art_dir.exists():
+        return 0
+
+    spec = load_mmfignore(root)
+    applied = 0
+    for artist_dir in sorted(p for p in art_dir.iterdir() if p.is_dir()):
+        for album_dir in sorted(p for p in artist_dir.iterdir() if p.is_dir()):
+            dest_album_dir = root / artist_dir.name / album_dir.name
+            if not dest_album_dir.is_dir():
+                warn(f"No matching album for queued art, skipping: {album_dir}")
+                continue
+            if is_ignored(spec, root, dest_album_dir):
+                continue
+            for art_file in sorted(p for p in album_dir.iterdir() if p.is_file()):
+                dest = dest_album_dir / art_file.name
+                shutil.copyfile(art_file, dest)
+                print(f"Album art applied: {dest}")
+                applied += 1
+    return applied
+
+
+def run_apply(args):
+    root = Path(args.root)
+    verify_queue_root(args.queue, root)
+    maybe_backup(args, root)
+
+    apply_queue(root, args.queue)
+    art_applied = apply_album_art(root, args.art_dir)
+    if art_applied:
+        print(f"{art_applied} album art file(s) applied.")
+
+
+# ---------------------------------------------------------------------------
+# normalize / convert: ffmpeg re-encodes, mutagen re-applies tags
+# ---------------------------------------------------------------------------
+
+def ffmpeg_available():
+    return shutil.which("ffmpeg") is not None
+
+
+def reencode_with_filter(path, filter_arg=None, new_suffix=None):
+    """Re-encode `path` in place (or to `new_suffix` alongside it if
+    given), preserving its tags. Returns the final path."""
+    handle = load_track(path)
+    if handle is None:
+        raise RuntimeError("could not read tags")
+    tags = get_tags(handle)
+
+    target_suffix = new_suffix or path.suffix
+    tmp_out = path.with_name(f".{path.stem}.mmf-tmp{target_suffix}")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path), "-map_metadata", "0"]
+    if filter_arg:
+        cmd += ["-af", filter_arg]
+    cmd.append(str(tmp_out))
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        tmp_out.unlink(missing_ok=True)
+        last_line = result.stderr.strip().splitlines()[-1] if result.stderr else "unknown error"
+        raise RuntimeError(f"ffmpeg failed: {last_line}")
+
+    final_path = path if new_suffix is None else path.with_suffix(new_suffix)
+    if new_suffix is not None:
+        path.unlink()
+    tmp_out.replace(final_path)
+
+    updates = {k: v for k, v in tags.items() if v}
+    out_handle = load_track(final_path)
+    if out_handle is not None:
+        set_tags(out_handle, updates)
+    return final_path
+
+
+def run_normalize(args):
+    """Loudness-normalize every track under root to a consistent
+    volume via ffmpeg's single-pass loudnorm filter."""
+    if not ffmpeg_available():
+        note("ffmpeg not found -- can't normalize loudness.")
+        return
+
+    root = Path(args.root)
+    maybe_backup(args, root)
+
+    filter_arg = f"loudnorm=I={args.lufs}:TP=-1.5:LRA=11"
+    counts = {"normalized": 0, "error": 0}
+    for _artist_name, _album_name, path in iter_music_files(root):
+        try:
+            reencode_with_filter(path, filter_arg=filter_arg)
+            print(f"Normalized: {path}")
+            counts["normalized"] += 1
+        except Exception as exc:
+            warn(f"Failed to normalize {path}: {exc}")
+            counts["error"] += 1
+
+    print(
+        f"\n{counts['normalized']} track(s) normalized, "
+        f"{counts['error']} error(s)."
+    )
+
+
+def run_convert(args):
+    """Re-encode every file of extension `from` under root to `to`,
+    preserving metadata."""
+    if not ffmpeg_available():
+        note("ffmpeg not found -- can't convert.")
+        return
+
+    from_ext = "." + args.from_ext.lower().lstrip(".")
+    to_ext = "." + args.to_ext.lower().lstrip(".")
+    if from_ext == to_ext:
+        note("from and to formats are the same -- nothing to do.")
+        return
+    if from_ext not in AUDIO_EXTENSIONS:
+        warn(f"{from_ext} isn't a recognized audio extension.")
+
+    root = Path(args.root)
+    maybe_backup(args, root)
+
+    counts = {"converted": 0, "error": 0}
+    for _artist_name, _album_name, path in iter_music_files_of_ext(root, from_ext):
+        try:
+            new_path = reencode_with_filter(path, new_suffix=to_ext)
+            print(f"Converted: {path.name} -> {new_path.name}")
+            counts["converted"] += 1
+        except Exception as exc:
+            warn(f"Failed to convert {path}: {exc}")
+            counts["error"] += 1
+
+    print(
+        f"\n{counts['converted']} track(s) converted, "
+        f"{counts['error']} error(s)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# check
+# ---------------------------------------------------------------------------
+
+FUZZY_SAME_ENOUGH = 0.92       # strings this similar count as "already correct"
+FUZZY_MATCH_THRESHOLD = 0.6    # min similarity to accept a text-search match
+TITLE_CHAR_DIFF_THRESHOLD = 3   # max chars for a filename/title to match
+
+QUEUE_FIELDS = ("album", "artist", "artists", "title", "tracknumber")
+
+QUEUE_HEADER = """\
+# Music metadata changes queue.
+#
+# Review and edit the fields below as needed, then apply with:
+#   {script} apply {root} --queue {queue}
+#
+# Delete a field to skip just that change, or remove a whole file's entry
+# to skip that file entirely. File paths (relative to root) are the keys.
+# A "# was: ..." comment shows the field's previous value, where it had one.
+
+"""
+
+# (key, label, normalizer) for check_duplicate_fields's per-field checks.
+DUPLICATE_FIELD_CHECKS = (
+    ("title", "title", lambda v: str(v).strip().casefold()),
+    ("tracknumber", "track number", normalize_track),
+)
+
+
+class RestartCheck(Exception):
+    """Raised to resolve a warning by hand: pending changes are
+    flushed, an editor opens on the queue file at `line`, and the
+    whole check restarts from a fresh read."""
+
+    def __init__(self, line=None):
+        super().__init__()
+        self.line = line
+
+
+class CheckStats:
+    """Mutable counters threaded through run_check's check_* helpers."""
+
+    def __init__(self):
+        self.warnings = 0
+        self.resolved = 0
+        self.changed = False
 
 
 def find_entry_line(lines, file):
@@ -1335,198 +1699,151 @@ def run_check(queue_file):
         print(f"\nNo inconsistencies found in {queue_file}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def add_backup_args(subparser):
+    subparser.add_argument(
+        "--no-backup", action="store_true",
+        help="Skip the compressed backup of root normally taken before "
+             "this step runs.",
+    )
+    subparser.add_argument(
+        "--tmp-dir", default=DEFAULT_TMP_DIR,
+        help="Working directory for backups (default: %(default)s)",
+    )
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
+        prog="music_metafix",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "root", nargs="?",
-        help="Root folder containing artist/album/song files. "
-             "Not needed for --check.",
-    )
+    subparsers = parser.add_subparsers(dest="step", required=True)
 
-    parser.add_argument(
-        "--apply", metavar="FILE",
-        help="Apply a previously queued changes file (see --queue) and "
-             "exit. No recognition, no API calls.",
+    scan_p = subparsers.add_parser(
+        "scan", help="Search MusicBrainz and queue metadata/art changes.",
     )
-
-    parser.add_argument(
-        "--check", metavar="FILE",
-        help="Scan a previously queued changes file (see --queue) for "
-             "likely mistakes, interactively asking what to do about each "
-             "one found (resolve by hand in $EDITOR, skip once, or always "
-             "skip by marking it '# OK'), then exit. No API calls, "
-             "no root needed.",
+    scan_p.add_argument("root", help="Root folder containing artist/album/song files.")
+    scan_p.add_argument(
+        "--queue", default=DEFAULT_QUEUE_FILE,
+        help="Where to write queued changes (default: %(default)s)",
     )
-
-    parser.add_argument(
-        "--album-art", nargs="?", const=ALBUM_ART_FILENAME, default=None,
-        metavar="FILENAME",
-        help="Download album art (scaled to 300x300, overwriting any "
-             "existing file) for every album under root, then exit. "
-             "Saved as FILENAME if given, otherwise "
-             f"{ALBUM_ART_FILENAME!r}. A separate mode -- run it on its "
-             "own.",
+    scan_p.add_argument(
+        "--no-art", action="store_true",
+        help="Don't download fresh album art during this scan.",
     )
-
-    parser.add_argument(
-        "--acoustid-api-key", default=os.environ.get("MMF_ACOUSTID_API_KEY"),
-        help="AcoustID API key (default: $MMF_ACOUSTID_API_KEY). "
-             "Free at https://acoustid.org/api-key",
+    scan_p.add_argument(
+        "--art-dir", default=DEFAULT_ART_DIR,
+        help="Where to queue downloaded album art for review "
+             "(default: %(default)s)",
     )
-    parser.add_argument(
-        "--no-acoustid", action="store_true",
-        help="Disable the AcoustID audio-fingerprinting fallback used "
-             "when the filename/tracklist match against MusicBrainz "
-             "can't place a file",
+    scan_p.add_argument(
+        "--art-filename", default=ALBUM_ART_FILENAME,
+        help="Filename to save queued album art as (default: %(default)s)",
     )
-
-    parser.add_argument(
+    scan_p.add_argument(
         "--musicbrainz-contact",
         default=os.environ.get("MMF_MUSICBRAINZ_CONTACT"),
         help="Contact email/URL sent to MusicBrainz as required by their "
              "API usage policy (default: $MMF_MUSICBRAINZ_CONTACT)",
     )
-    parser.add_argument(
+    scan_p.add_argument(
         "--no-musicbrainz", action="store_true",
-        help="Disable the MusicBrainz text search matched against the "
-             "filename (falls straight through to AcoustID)",
+        help="Disable MusicBrainz text search (folder-trusted "
+             "artist/album and filename-derived track numbers still apply)",
     )
 
-    parser.add_argument(
-        "--rename", metavar="TEMPLATE", default=None,
-        help="Rename files under root to this template using their "
-             "current tags, then exit, e.g. '%%num - %%title' -> "
-             "'01 - Song Title.mp3'. Placeholders: %%num, %%title, "
-             "%%artist, %%album, %%ext. A separate mode -- run it on "
-             "its own, typically after --apply.",
+    check_p = subparsers.add_parser(
+        "check", help="Sanity-check a queued changes file.",
+    )
+    check_p.add_argument(
+        "queue", nargs="?", default=DEFAULT_QUEUE_FILE,
+        help="Queue file to check (default: %(default)s)",
     )
 
-    parser.add_argument(
-        "--queue", metavar="FILE", default="temp/changes.yml",
-        help="Where to write queued changes for review instead of "
-             "applying them immediately (default: %(default)s)",
+    fingerprint_p = subparsers.add_parser(
+        "fingerprint",
+        help="AcoustID sanity-check the queued titles against the actual audio.",
     )
+    fingerprint_p.add_argument("root", help="Root folder the queue was scanned from.")
+    fingerprint_p.add_argument(
+        "--queue", default=DEFAULT_QUEUE_FILE,
+        help="Queue file to check (default: %(default)s)",
+    )
+    fingerprint_p.add_argument(
+        "--acoustid-api-key", default=os.environ.get("MMF_ACOUSTID_API_KEY"),
+        help="AcoustID API key (default: $MMF_ACOUSTID_API_KEY). "
+             "Free at https://acoustid.org/api-key",
+    )
+
+    apply_p = subparsers.add_parser(
+        "apply", help="Apply a queued changes file and its queued album art.",
+    )
+    apply_p.add_argument("root", help="Root folder the queue was scanned from.")
+    apply_p.add_argument(
+        "--queue", default=DEFAULT_QUEUE_FILE,
+        help="Queue file to apply (default: %(default)s)",
+    )
+    apply_p.add_argument(
+        "--art-dir", default=DEFAULT_ART_DIR,
+        help="Where queued album art was saved (default: %(default)s)",
+    )
+    add_backup_args(apply_p)
+
+    normalize_p = subparsers.add_parser(
+        "normalize", help="Loudness-normalize every track under root.",
+    )
+    normalize_p.add_argument("root", help="Root folder containing artist/album/song files.")
+    normalize_p.add_argument(
+        "--lufs", type=float, default=-16.0,
+        help="Target integrated loudness in LUFS (default: %(default)s)",
+    )
+    add_backup_args(normalize_p)
+
+    convert_p = subparsers.add_parser(
+        "convert", help="Re-encode every file of one format to another, preserving metadata.",
+    )
+    convert_p.add_argument("root", help="Root folder containing artist/album/song files.")
+    convert_p.add_argument("from_ext", metavar="from", help="Source extension, e.g. wma")
+    convert_p.add_argument("to_ext", metavar="to", help="Target extension, e.g. mp3")
+    add_backup_args(convert_p)
+
+    rename_p = subparsers.add_parser(
+        "rename", help="Rename files under root from a tag-rendered template.",
+    )
+    rename_p.add_argument("root", help="Root folder containing artist/album/song files.")
+    rename_p.add_argument(
+        "template",
+        help="Template rendered from current tags, e.g. '%%num - %%title' "
+             "-> '01 - Song Title.mp3'. Placeholders: %%num, %%title, "
+             "%%artist, %%album, %%ext.",
+    )
+    add_backup_args(rename_p)
+
     return parser
-
-
-def warn_missing_recognition_deps(args):
-    """Note any missing/unconfigured recognition dependency, disabling
-    AcoustID in `args` if it has no key."""
-    if args.no_acoustid:
-        args.acoustid_api_key = None
-    elif not acoustid:
-        missing_package(
-            "pyacoustid", "pyacoustid", "audio fingerprinting disabled.",
-        )
-    elif not args.acoustid_api_key:
-        note(
-            "no AcoustID API key set (--acoustid-api-key or "
-            "$MMF_ACOUSTID_API_KEY) -- audio fingerprinting disabled."
-        )
-    if not configure_musicbrainz(args.musicbrainz_contact):
-        missing_package(
-            "musicbrainzngs", "musicbrainzngs", "text-search fallback "
-            "disabled.",
-        )
-
-
-def print_change(file, fields):
-    """Print one file's pending changes to stdout."""
-    print(file)
-    for key in QUEUE_FIELDS:
-        print(f"    {key}: {fields[key]!r}")
-
-
-def write_queue_entry(queue_f, file, fields, previous):
-    """Append one file's changes to the queue file, flushed +
-    fsynced so a crash mid-run doesn't lose prior results."""
-    queue_f.write(f"{render_yaml_scalar(file)}:\n")
-    for key, value in fields.items():
-        line = f"  {key}: {render_yaml_scalar(value)}"
-        if previous.get(key):
-            line += f"  # was: {render_yaml_scalar(previous[key])}"
-        queue_f.write(line + "\n")
-    queue_f.flush()
-    os.fsync(queue_f.fileno())
-
-
-def run_recognition(args):
-    """Scan every music file under root and queue pending changes for
-    review. The default (no-mode-flag) pass."""
-    warn_missing_recognition_deps(args)
-
-    counts = {"queued": 0, "ok": 0, "error": 0}
-    mb_cache = {}
-
-    queue_path = Path(args.queue)
-    queue_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(queue_path, "w", encoding="utf-8") as queue_f:
-        queue_f.write(QUEUE_HEADER.format(
-            script=sys.argv[0], root=args.root, queue=args.queue,
-        ))
-        queue_f.flush()
-
-        for artist_name, album_name, path in iter_music_files(args.root):
-            try:
-                entry = compute_change(
-                    args.root, artist_name, album_name, path, args, mb_cache,
-                )
-            except Exception as exc:
-                warn(f"Unexpected error on {path}: {exc}")
-                counts["error"] += 1
-                continue
-
-            if entry is None:
-                print(f"{path}: OK")
-                counts["ok"] += 1
-                continue
-
-            file, fields, previous = entry
-            print_change(file, fields)
-            write_queue_entry(queue_f, file, fields, previous)
-            counts["queued"] += 1
-
-    if counts["queued"]:
-        print(
-            f"\n{counts['queued']} pending change(s) written to "
-            f"{args.queue}"
-        )
-        print(
-            f"Review/edit it, then run:\n  "
-            f"{sys.argv[0]} {args.root} --apply {args.queue}"
-        )
-    else:
-        print("\nNo changes needed.")
-    print(f"({counts['ok']} already correct, {counts['error']} errors)")
 
 
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    if args.check:
-        run_check(args.check)
-        return
-
-    if args.root is None:
-        parser.error("the following arguments are required: root")
-
-    if args.apply:
-        apply_queue(args.root, args.apply)
-        return
-
-    if args.album_art is not None:
-        run_album_art(args.root, args.album_art, args.musicbrainz_contact)
-        return
-
-    if args.rename:
-        run_rename(args.root, args.rename)
-        return
-
-    run_recognition(args)
+    if args.step == "scan":
+        run_scan(args)
+    elif args.step == "check":
+        run_check(args.queue)
+    elif args.step == "fingerprint":
+        run_fingerprint(args)
+    elif args.step == "apply":
+        run_apply(args)
+    elif args.step == "normalize":
+        run_normalize(args)
+    elif args.step == "convert":
+        run_convert(args)
+    elif args.step == "rename":
+        run_rename_step(args)
 
 
 if __name__ == "__main__":
