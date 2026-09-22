@@ -58,21 +58,23 @@ from urllib.error import HTTPError, URLError
 
 from common import check as chk
 from common.cli import (
-    SCANNED_ROOT_HELP, add_backup_args, add_queue_arg, add_root_arg,
-    build_parser, run_step,
+    SCANNED_ROOT_HELP, add_backup_args, add_check_parser, add_convert_parser,
+    add_queue_arg, add_root_arg, build_parser, run_step,
 )
 from common.ffmpeg import (
-    ffmpeg_available, ffprobe_json, replace_with, run_ffmpeg,
+    ffprobe_json, replace_with, require_ffmpeg, run_ffmpeg,
     temp_output_path,
 )
 from common.files import (
-    iter_dirs, iter_files, iter_kept, load_mmfignore, maybe_backup,
+    iter_dirs, iter_files, iter_kept, load_mmfignore, maybe_backup, move,
+    rename_target, with_extension,
 )
-from common.http import fetch, fetch_json
+from common.http import cached, fetch, fetch_json
 from common.queue import (
     apply_queue, build_queue_fields, load_queue, print_scan_summary,
     scan_to_queue, verify_queue_root,
 )
+from common.steps import convert_extensions, process_each
 from common.text import (
     FUZZY_SAME_ENOUGH, best_fuzzy_match, fuzzy_ratio, leading_int,
     render_filename, should_replace,
@@ -126,10 +128,6 @@ def iter_videos(root):
         for season in iter_kept(spec, root, iter_dirs(top)):
             files = filter(is_video, iter_files(season))
             yield from iter_kept(spec, root, files)
-
-
-def iter_videos_of_ext(root, ext):
-    return (p for p in iter_videos(root) if p.suffix.lower() == ext)
 
 
 # ---------------------------------------------------------------------------
@@ -322,23 +320,14 @@ def tmdb_movie(title, year, api_key):
     }
 
 
-def cached(cache, key, lookup):
-    """`lookup()` once per `key`; failures are warned and cached as
-    None."""
-    if key not in cache:
-        try:
-            cache[key] = lookup()
-        except (HTTPError, URLError, OSError, ValueError) as exc:
-            warn(f"Lookup failed for {key!r}: {exc}")
-            cache[key] = None
-    return cache[key]
-
-
 def show_episodes(show, args, cache):
     """{(season, episode): title} for `show`, or None."""
     if args.no_tvmaze:
         return None
-    result = cached(cache, ("tvmaze", show), lambda: tvmaze_episodes(show))
+    result = cached(
+        cache, ("tvmaze", show), lambda: tvmaze_episodes(show),
+        f"TVmaze lookup for {show!r}",
+    )
     if result is None:
         return None
     name, titles = result
@@ -365,10 +354,12 @@ def match_movie(guess, args, cache):
     """TMDB's {"title", "year"} for a guessed movie, or None."""
     if not args.tmdb_api_key:
         return None
-    key = ("tmdb", guess["title"], guess["year"])
-    return cached(cache, key, lambda: tmdb_movie(
-        guess["title"], guess["year"], args.tmdb_api_key,
-    ))
+    title, year = guess["title"], guess["year"]
+    return cached(
+        cache, ("tmdb", title, year),
+        lambda: tmdb_movie(title, year, args.tmdb_api_key),
+        f"TMDB lookup for {title!r}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +423,7 @@ def compute_scan_change(root, path, args, cache):
 
 
 def run_scan(args):
-    if not ffmpeg_available():
-        note("ffmpeg/ffprobe not found -- can't read tags.")
+    if not require_ffmpeg("read tags"):
         return
     if not args.tmdb_api_key:
         note("no TMDB API key -- movie titles come from filenames.")
@@ -734,8 +724,7 @@ def caption_one_file(client, root, path, lang):
 def run_caption(args):
     """Download and embed `args.lang` subtitles for every video that
     doesn't already have them."""
-    if not ffmpeg_available():
-        note("ffmpeg not found -- can't embed subtitles.")
+    if not require_ffmpeg("embed subtitles"):
         return
     client = opensubtitles_client(args)
     if client is None:
@@ -768,28 +757,21 @@ def convert_file(path, to_ext):
 
 
 def run_convert(args):
-    if not ffmpeg_available():
-        note("ffmpeg not found -- can't convert.")
+    """Remux every `from` file under root into `to`."""
+    if not require_ffmpeg("convert"):
         return
-    from_ext = "." + args.from_ext.lower().lstrip(".")
-    to_ext = "." + args.to_ext.lower().lstrip(".")
-    if from_ext == to_ext:
-        note("from and to formats are the same -- nothing to do.")
+    exts = convert_extensions(args)
+    if exts is None:
         return
+    from_ext, to_ext = exts
     root = Path(args.root)
     maybe_backup(args, root, compress=False)
-    counts = Counter()
-    for path in iter_videos_of_ext(root, from_ext):
-        try:
-            new_path = convert_file(path, to_ext)
-        except (RuntimeError, OSError) as exc:
-            warn(f"Failed to convert {path}: {exc}")
-            counts["error"] += 1
-            continue
-        print(f"Converted: {path.name} -> {new_path.name}")
-        counts["converted"] += 1
-    print(f"\n{counts['converted']} file(s) converted, "
-          f"{counts['error']} error(s).")
+
+    def convert(path):
+        return f"{path.name} -> {convert_file(path, to_ext).name}"
+
+    paths = with_extension(iter_videos(root), from_ext)
+    process_each(paths, convert, "convert", "file")
 
 
 # ---------------------------------------------------------------------------
@@ -818,20 +800,15 @@ def sidecar_subtitles(path):
 
 
 def rename_file(path, template):
-    new_name = render_filename(
-        template, path, template_values(path, read_tags(path)),
-    )
-    if new_name == path.name:
-        return
-    new_path = path.with_name(new_name)
-    if new_path.exists():
-        warn(f"Rename target already exists, skipping: {new_path}")
+    """Rename `path` (and its sidecar subtitles) from its tags."""
+    values = template_values(path, read_tags(path))
+    new_path = rename_target(path, render_filename(template, path, values))
+    if new_path is None:
         return
     for sidecar in sidecar_subtitles(path):
         lang_suffix = sidecar.name[len(path.stem):]
         sidecar.rename(path.with_name(new_path.stem + lang_suffix))
-    path.rename(new_path)
-    print(f"Renamed: {path.name} -> {new_name}")
+    move(path, new_path)
 
 
 def run_rename(args):
@@ -859,10 +836,7 @@ YEAR = ("year", "year")
 def check_episode_group(lines, stats, season_dir, group):
     chk.check_partial_numbers(lines, stats, season_dir, group, *EPISODE)
     chk.check_number_gaps(lines, stats, season_dir, group, *EPISODE)
-    chk.check_duplicates(
-        lines, stats, season_dir, group, "title", "title",
-        chk.casefold_str,
-    )
+    chk.check_duplicate_titles(lines, stats, season_dir, group)
     chk.check_duplicates(
         lines, stats, season_dir, group, *EPISODE, leading_int,
     )
@@ -871,10 +845,7 @@ def check_episode_group(lines, stats, season_dir, group):
 
 
 def check_movie_group(lines, stats, series_dir, group):
-    chk.check_duplicates(
-        lines, stats, series_dir, group, "title", "title",
-        chk.casefold_str,
-    )
+    chk.check_duplicate_titles(lines, stats, series_dir, group)
     chk.check_inconsistent(lines, stats, series_dir, group, "series")
 
 
@@ -986,13 +957,6 @@ def add_scan_args(subparsers):
     )
 
 
-def add_check_args(subparsers):
-    check_p = subparsers.add_parser(
-        "check", help="Sanity-check a queued changes file.",
-    )
-    add_queue_arg(check_p, "Queue file to check")
-
-
 def add_fingerprint_args(subparsers):
     fingerprint_p = subparsers.add_parser(
         "fingerprint",
@@ -1026,17 +990,10 @@ def add_caption_args(subparsers):
 
 
 def add_convert_args(subparsers):
-    convert_p = subparsers.add_parser(
-        "convert", help="Remux files into another container.",
+    add_convert_parser(
+        subparsers, "Remux files into another container.", ROOT_HELP,
+        ("avi", "mkv"),
     )
-    add_root_arg(convert_p, ROOT_HELP)
-    convert_p.add_argument(
-        "from_ext", metavar="from", help="Source extension, e.g. avi",
-    )
-    convert_p.add_argument(
-        "to_ext", metavar="to", help="Target extension, e.g. mkv",
-    )
-    add_backup_args(convert_p)
 
 
 def add_rename_args(subparsers):
@@ -1059,7 +1016,7 @@ def add_rename_args(subparsers):
 
 def build_arg_parser():
     return build_parser("tv_metafix", __doc__, (
-        add_scan_args, add_check_args, add_fingerprint_args,
+        add_scan_args, add_check_parser, add_fingerprint_args,
         add_apply_args, add_caption_args, add_convert_args,
         add_rename_args,
     ))

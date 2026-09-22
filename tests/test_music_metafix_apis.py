@@ -112,18 +112,33 @@ def test_recognize_no_release(mmf, fake_mb):
     (None, "second song", 2),  # else fuzzy title matching
     (None, "nothing like it", None),
 ])
-def test_match_via_musicbrainz(mmf, fake_mb, filename_track,
-                               filename_title, expected):
-    updates = {}
-    matched = mmf.match_via_musicbrainz(
-        updates, {"title": "old"}, "Artist A", "Album", filename_track,
-        filename_title, Namespace(no_musicbrainz=False), {},
+def test_locate_track(mmf, fake_mb, filename_track, filename_title,
+                      expected):
+    track_map = mmf.album_tracks(
+        "Artist A", "Album", Namespace(no_musicbrainz=False), {},
     )
-    assert matched == (expected is not None)
-    if expected:
-        assert updates["tracknumber"] == str(expected)
-        assert updates["title"] == "Second Song"
-        assert updates["artists"] == ["Artist A", "Guest"]
+    assert mmf.locate_track(
+        track_map, filename_track, filename_title) == expected
+
+
+def test_album_tracks_cached_and_optional(mmf, fake_mb):
+    cache = {}
+    args = Namespace(no_musicbrainz=False)
+    mmf.album_tracks("A", "B", args, cache)
+    mmf.album_tracks("A", "B", args, cache)
+    assert fake_mb.searches == [("A", "B")]
+    assert mmf.album_tracks(
+        "A", "B", Namespace(no_musicbrainz=True), {}) is None
+
+
+def test_apply_track_match(mmf):
+    updates = {}
+    match = {"title": "Second Song", "artists": ["Artist A", "Guest"]}
+    mmf.apply_track_match(
+        updates, {"title": "old", "tracknumber": "1"}, 2, match,
+    )
+    assert updates == {"title": "Second Song", "tracknumber": "2",
+                       "artists": ["Artist A", "Guest"]}
 
 
 @needs_ffmpeg

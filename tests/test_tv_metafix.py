@@ -263,12 +263,12 @@ def test_scan_without_tvmaze_uses_filename(tmf, tmp_path, capsys):
     }}
 
 
-def test_iter_videos_of_ext(tmf, tmp_path):
+def test_videos_with_extension(tmf, tmp_path):
     for name in ("a.MKV", "b.mp4"):
         (tmp_path / "Heat").mkdir(exist_ok=True)
         (tmp_path / "Heat" / name).touch()
-    assert [p.name for p in tmf.iter_videos_of_ext(tmp_path, ".mkv")] == \
-        ["a.MKV"]
+    videos = tmf.with_extension(tmf.iter_videos(tmp_path), ".mkv")
+    assert [p.name for p in videos] == ["a.MKV"]
 
 
 @pytest.mark.parametrize("step", [

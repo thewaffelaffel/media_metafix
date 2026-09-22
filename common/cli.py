@@ -32,6 +32,13 @@ def add_backup_args(subparser):
     )
 
 
+def add_check_parser(subparsers):
+    check_p = subparsers.add_parser(
+        "check", help="Sanity-check a queued changes file.",
+    )
+    add_queue_arg(check_p, "Queue file to check")
+
+
 def build_parser(prog, doc, adders):
     """Top-level parser with one subcommand per `adders` callable."""
     parser = argparse.ArgumentParser(
@@ -47,3 +54,17 @@ def build_parser(prog, doc, adders):
 def run_step(parser, handlers, argv=None):
     args = parser.parse_args(argv)
     return handlers[args.step](args)
+
+
+def add_convert_parser(subparsers, help_text, root_help, example):
+    """`convert <root> <from> <to>`; `example` is e.g. ("wma", "mp3")."""
+    convert_p = subparsers.add_parser("convert", help=help_text)
+    add_root_arg(convert_p, root_help)
+    convert_p.add_argument(
+        "from_ext", metavar="from",
+        help=f"Source extension, e.g. {example[0]}",
+    )
+    convert_p.add_argument(
+        "to_ext", metavar="to", help=f"Target extension, e.g. {example[1]}",
+    )
+    add_backup_args(convert_p)

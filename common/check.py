@@ -186,6 +186,12 @@ def check_duplicates(lines, stats, group_dir, group, key, label,
         warn_fields(lines, stats, message, [(f, key) for f in files])
 
 
+def check_duplicate_titles(lines, stats, group_dir, group):
+    check_duplicates(
+        lines, stats, group_dir, group, "title", "title", casefold_str,
+    )
+
+
 def check_inconsistent(lines, stats, group_dir, group, key,
                        normalize=lambda v: str(v).strip()):
     """Warn if a group disagrees on `key`."""
@@ -241,34 +247,38 @@ def check_in_range(lines, stats, file, fields, group, key, label):
     warn_field(lines, stats, message, file, key)
 
 
+def filename_matches(stem, number, title, parse_number, strip_number):
+    """True if `stem` carries `number` or roughly `title`.
+    `parse_number`/`strip_number` read a number off a stem and drop
+    it."""
+    if number is not None and parse_number(stem) == number:
+        return True
+    return bool(title) and titles_match(strip_number(stem), str(title))
+
+
 def check_filename_match(lines, stats, file, fields, number_key, label,
                          parse_number, strip_number):
     """Warn if the filename matches neither the queued title nor
-    `number_key`. `parse_number`/`strip_number` read the number off
-    a filename stem and remove it."""
+    `number_key`."""
     title = fields.get("title")
     number = leading_int(fields.get(number_key))
     if number is None and title is None:
         return
-    stem = Path(file).stem
-    file_number = parse_number(stem)
-    if number is not None and file_number == number:
+    if filename_matches(Path(file).stem, number, title, parse_number,
+                        strip_number):
         return
-    if title and titles_match(strip_number(stem), str(title)):
-        return
-    mismatches = []
-    keys = []
-    if number is not None:
-        mismatches.append(f"{label} {number}")
-        keys.append(number_key)
-    if title is not None:
-        mismatches.append(f"title {title!r}")
-        keys.append("title")
+    # (key, description) of each queued value the filename lacks.
+    missed = [
+        (key, text) for key, value, text in (
+            (number_key, number, f"{label} {number}"),
+            ("title", title, f"title {title!r}"),
+        ) if value is not None
+    ]
     message = (
         f"{file}: filename doesn't match its new "
-        f"{' or '.join(mismatches)}."
+        f"{' or '.join(text for _key, text in missed)}."
     )
-    ok_lines = [find_field_line(lines, file, k) for k in keys]
+    ok_lines = [find_field_line(lines, file, key) for key, _text in missed]
     resolve_warning(
         lines, stats, message, ok_lines, find_entry_line(lines, file),
     )

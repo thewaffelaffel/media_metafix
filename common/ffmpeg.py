@@ -4,9 +4,19 @@ import json
 import shutil
 import subprocess
 
+from .ui import note
+
 
 def ffmpeg_available():
     return shutil.which("ffmpeg") is not None
+
+
+def require_ffmpeg(action):
+    """True if ffmpeg is installed; else note we can't `action`."""
+    if ffmpeg_available():
+        return True
+    note(f"ffmpeg not found -- can't {action}.")
+    return False
 
 
 def run_ffmpeg(cmd, tmp_out):

@@ -4,7 +4,7 @@ import tarfile
 from datetime import datetime
 from pathlib import Path
 
-from .ui import missing_package
+from .ui import missing_package, warn
 
 try:
     import pathspec
@@ -48,6 +48,10 @@ def iter_files(path):
     return sorted(p for p in path.iterdir() if p.is_file())
 
 
+def with_extension(paths, ext):
+    return (p for p in paths if p.suffix.lower() == ext)
+
+
 def iter_kept(spec, root, paths):
     """`paths` minus those `spec` ignores."""
     return (p for p in paths if not is_ignored(spec, root, p))
@@ -64,6 +68,28 @@ def iter_non_ignored_files(root, spec):
                 stack.append(entry)
             else:
                 yield entry
+
+
+def rename_target(path, new_name):
+    """`path` with `new_name`, or None (warned) if that's unchanged,
+    taken or invalid."""
+    if new_name == path.name:
+        return None
+    try:
+        new_path = path.with_name(new_name)
+    except ValueError as exc:
+        warn(f"Invalid rename target, skipping: {path} -> {new_name!r} "
+             f"({exc})")
+        return None
+    if new_path.exists():
+        warn(f"Rename target already exists, skipping: {new_path}")
+        return None
+    return new_path
+
+
+def move(path, new_path):
+    path.rename(new_path)
+    print(f"Renamed: {path.name} -> {new_path.name}")
 
 
 def create_backup(root, tmp_dir, compress=True):

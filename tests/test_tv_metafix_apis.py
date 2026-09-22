@@ -103,7 +103,7 @@ def test_lookup_failure_is_cached_as_none(tmf, fake_api, capsys):
     assert tmf.show_episodes("X", args, cache) is None
     assert tmf.show_episodes("X", args, cache) is None
     assert len(api.calls) == 1
-    assert "Lookup failed" in capsys.readouterr().err
+    assert "TVmaze lookup for 'X' failed" in capsys.readouterr().err
 
 
 def test_tmdb_movie(tmf, fake_api):
