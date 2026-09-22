@@ -62,6 +62,7 @@ Usage:
     music_metafix normalize /path/to/music/root
     music_metafix convert /path/to/music/root wma mp3
     music_metafix rename /path/to/music/root "%num - %title"
+    music_metafix rename /path/to/music/root "%num - %title (feat. %features)"
 
 A queue file's entries are paths relative to the root it was scanned
 from, so `fingerprint`/`apply` need that same root.
@@ -336,10 +337,14 @@ def sanitize_filename_part(text):
 
 def render_filename(template, path, final_tags):
     track_no = normalize_track(final_tags.get("tracknumber"))
+    artists = final_tags.get("artists") or []
     values = {
         "%num": f"{track_no:02d}" if track_no is not None else "00",
         "%title": (final_tags.get("title") or "").strip() or path.stem,
         "%artist": final_tags.get("artist") or "",
+        # artists[0] is the main artist (== %artist); the rest are
+        # featured artists, e.g. "Song feat. X, Y".
+        "%features": ", ".join(artists[1:]),
         "%album": final_tags.get("album") or "",
         "%ext": path.suffix.lstrip("."),
     }
@@ -1932,7 +1937,8 @@ def add_rename_args(subparsers):
         "template",
         help="Template rendered from current tags, e.g. '%%num - %%title' "
              "-> '01 - Song Title.mp3'. Placeholders: %%num, %%title, "
-             "%%artist, %%album, %%ext.",
+             "%%artist, %%features (other artists on the track, "
+             "comma-separated), %%album, %%ext.",
     )
     add_backup_args(rename_p)
 
