@@ -1,3 +1,4 @@
+import argparse
 from argparse import Namespace
 from pathlib import Path
 
@@ -288,10 +289,10 @@ def test_cli_dispatch(tmf, monkeypatch):
     monkeypatch.setitem(tmf.STEP_HANDLERS, "scan", calls.append)
     monkeypatch.setenv("TMF_OPENSUBTITLES_API_KEY", "from-env")
     monkeypatch.setattr("sys.argv", [
-        "tv_metafix", "scan", "/videos", "--lang", "fr",
+        "tv_metafix", "scan", "/videos", "--sub-lang", "PT-br",
     ])
     tmf.main()
-    assert (calls[0].root, calls[0].lang) == ("/videos", "fr")
+    assert (calls[0].root, calls[0].sub_lang) == ("/videos", "pt-BR")
     assert calls[0].opensubtitles_api_key == "from-env"
     assert not calls[0].no_captions
     assert calls[0].captions_dir == "tmp/captions"
@@ -361,3 +362,23 @@ def test_rename_moves_all_sidecars(tmf, tmp_path):
     tmf.rename_file(video, "%title")
     assert sorted(p.name for p in video.parent.iterdir()) == \
         ["Heat.en.ass", "Heat.mkv", "Heat.srt"]
+
+
+@pytest.mark.parametrize("text, code", [
+    ("en", "en"), ("FR", "fr"), ("pt-br", "pt-BR"), (" zh-CN ", "zh-CN"),
+])
+def test_subtitle_language(tmf, text, code):
+    assert tmf.subtitle_language(text) == code
+
+
+@pytest.mark.parametrize("text", ["english", "e", "en_US", "pt-BRA", ""])
+def test_subtitle_language_rejects(tmf, text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        tmf.subtitle_language(text)
+
+
+def test_regional_language_codes(tmf):
+    assert tmf.language_codes("pt-BR") == ("pt-BR", "pt", "por")
+    assert tmf.iso639_2("pt-BR") == "por"
+    assert tmf.iso639_2("de") == "ger"
+    assert tmf.iso639_2("xx") == "xx"

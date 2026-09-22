@@ -75,15 +75,16 @@ Other steps (run any step with `-h` for its options):
   known releases are identified; re-encoded files show as "unknown".
 - **Album art** is only downloaded for albums without an `art.jpg`,
   and `apply` never replaces an existing one.
-- **Subtitles** (`scan --lang en` by default, `--no-captions` to skip)
-  are only downloaded for videos without subtitles in that language,
-  embedded or in a file alongside (`.srt`, `.ass`, `.ssa`, `.vtt`,
-  `.sub`). Subtitles with no language tag count too, to avoid
-  duplicates.
-  Downloads count against OpenSubtitles' daily limit, and a rescan
-  reuses files already in `tmp/captions/`. `apply` embeds them in MKV,
-  MP4, M4V, MOV and WebM; other containers, like AVI, get a
-  `name.<lang>.srt` file alongside.
+- **Subtitles** are English by default; `scan --sub-lang fr` (or any
+  OpenSubtitles code, like `pt-BR`) picks another language, and
+  `--no-captions` skips them. `scan` checks the code with OpenSubtitles
+  before scanning anything. Subtitles are only downloaded for videos
+  without any in that language, embedded or in a file alongside
+  (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`); subtitles with no language
+  tag count too, to avoid duplicates. Downloads count against
+  OpenSubtitles' daily limit, and a rescan reuses files already in
+  `tmp/captions/`. `apply` embeds them in MKV, MP4, M4V, MOV and WebM;
+  other containers, like AVI, get a `name.<lang>.srt` file alongside.
 
 TMF tags are `title`, `show`, `season_number`, `episode_sort`, `date`
 and `collection` (the series; `album` in MP4/AVI). AVI can't hold the

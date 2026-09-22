@@ -19,10 +19,12 @@ matches from every step.
 See README.md for setup and examples.
 """
 
+import argparse
 import glob
 import os
 import re
 import struct
+import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -404,6 +406,8 @@ def run_scan(args):
         return
     if not args.tmdb_api_key:
         note("no TMDB API key -- movie titles come from filenames.")
+    # Checked first, so a bad --sub-lang fails before the slow part.
+    captions = None if args.no_captions else caption_setup(args)
     root = Path(args.root)
     cache = {}
     counts = scan_to_queue(
@@ -411,8 +415,8 @@ def run_scan(args):
         lambda path: compute_scan_change(root, path, args, cache),
         "Video",
     )
-    if not args.no_captions:
-        queue_captions(root, args)
+    if captions:
+        queue_captions(root, *captions, args.captions_dir)
     print_scan_summary(counts, args)
 
 
@@ -459,6 +463,11 @@ class OpenSubtitles:
         self.token = self.call(
             "login", body={"username": username, "password": password},
         )["token"]
+
+    def languages(self):
+        """{lowercased code: code} of every subtitle language."""
+        data = self.call("infos/languages").get("data", [])
+        return {d["language_code"].lower(): d["language_code"] for d in data}
 
     def search(self, **params):
         return self.call("subtitles", {
@@ -568,13 +577,29 @@ def run_fingerprint(args):
 
 # ISO 639-1 -> ISO 639-2 codes (first is written; any is recognized).
 LANGUAGE_CODES = {
-    "en": ("eng",), "es": ("spa",), "fr": ("fre", "fra"),
-    "de": ("ger", "deu"), "it": ("ita",), "pt": ("por",),
-    "nl": ("dut", "nld"), "sv": ("swe",), "da": ("dan",), "fi": ("fin",),
-    "no": ("nor",), "pl": ("pol",), "ru": ("rus",), "ja": ("jpn",),
-    "zh": ("chi", "zho"), "ko": ("kor",), "ar": ("ara",), "he": ("heb",),
-    "tr": ("tur",), "el": ("gre", "ell"), "cs": ("cze", "ces"),
-    "hu": ("hun",),
+    "af": ("afr",), "an": ("arg",), "ar": ("ara",), "as": ("asm",),
+    "az": ("aze",), "be": ("bel",), "bg": ("bul",), "bn": ("ben",),
+    "br": ("bre",), "bs": ("bos",), "ca": ("cat",), "cs": ("cze", "ces"),
+    "cy": ("wel", "cym"), "da": ("dan",), "de": ("ger", "deu"),
+    "el": ("gre", "ell"), "en": ("eng",), "eo": ("epo",), "es": ("spa",),
+    "et": ("est",), "eu": ("baq", "eus"), "fa": ("per", "fas"),
+    "fi": ("fin",), "fr": ("fre", "fra"), "ga": ("gle",), "gd": ("gla",),
+    "gl": ("glg",), "he": ("heb",), "hi": ("hin",), "hr": ("hrv",),
+    "hu": ("hun",), "hy": ("arm", "hye"), "ia": ("ina",), "id": ("ind",),
+    "ig": ("ibo",), "is": ("ice", "isl"), "it": ("ita",), "ja": ("jpn",),
+    "ka": ("geo", "kat"), "kk": ("kaz",), "km": ("khm",), "kn": ("kan",),
+    "ko": ("kor",), "ku": ("kur",), "lb": ("ltz",), "lt": ("lit",),
+    "lv": ("lav",), "mk": ("mac", "mkd"), "ml": ("mal",), "mn": ("mon",),
+    "mr": ("mar",), "ms": ("may", "msa"), "my": ("bur", "mya"),
+    "nb": ("nob",), "ne": ("nep",), "nl": ("dut", "nld"), "nn": ("nno",),
+    "no": ("nor",), "oc": ("oci",), "or": ("ori",), "pa": ("pan",),
+    "pl": ("pol",), "ps": ("pus",), "pt": ("por",), "ro": ("rum", "ron"),
+    "ru": ("rus",), "sd": ("snd",), "si": ("sin",), "sk": ("slo", "slk"),
+    "sl": ("slv",), "so": ("som",), "sq": ("alb", "sqi"), "sr": ("srp",),
+    "sv": ("swe",), "sw": ("swa",), "ta": ("tam",), "te": ("tel",),
+    "th": ("tha",), "tk": ("tuk",), "tl": ("tgl",), "tr": ("tur",),
+    "tt": ("tat",), "uk": ("ukr",), "ur": ("urd",), "uz": ("uzb",),
+    "vi": ("vie",), "zh": ("chi", "zho"),
 }
 # Subtitle codec to embed as, per container; others get a sidecar .srt.
 SUBTITLE_CODECS = {
@@ -584,16 +609,41 @@ SUBTITLE_CODECS = {
 
 
 # Language tags meaning "unknown"; such subtitles count as present.
-UNTAGGED = {None, "", "und"}
+UNTAGGED = {"", "und"}
 SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
 
 
+# OpenSubtitles' codes: ISO 639-1, sometimes with a region ("pt-BR").
+SUB_LANG_RE = re.compile(r"([a-z]{2})(?:-([a-z]{2}))?", re.IGNORECASE)
+
+
+def subtitle_language(text):
+    """argparse type: "PT-br" -> "pt-BR"; rejects other shapes."""
+    match = SUB_LANG_RE.fullmatch(text.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} isn't an OpenSubtitles language code "
+            f"(e.g. en, fr, pt-BR)"
+        )
+    base, region = match.groups()
+    return base.lower() + (f"-{region.upper()}" if region else "")
+
+
+def base_language(lang):
+    """"pt-BR" -> "pt"."""
+    return lang.split("-")[0].lower()
+
+
 def language_codes(lang):
-    return (lang, *LANGUAGE_CODES.get(lang, ()))
+    """Every tag `lang` subtitles might carry: "pt-BR" -> ("pt-BR",
+    "pt", "por")."""
+    base = base_language(lang)
+    return (lang, base, *LANGUAGE_CODES.get(base, ()))
 
 
 def iso639_2(lang):
-    return LANGUAGE_CODES.get(lang, (lang,))[0]
+    base = base_language(lang)
+    return LANGUAGE_CODES.get(base, (base,))[0]
 
 
 def subtitle_streams(path):
@@ -623,12 +673,12 @@ def sidecar_language(sidecar, video):
 def has_subtitles(path, lang):
     """True if `path` has `lang` or untagged subtitles, embedded or
     alongside. Untagged ones count, so nothing gets doubled up."""
-    accepted = {*language_codes(lang), *UNTAGGED}
+    accepted = {code.lower() for code in language_codes(lang)} | UNTAGGED
     return any(
-        sidecar_language(sidecar, path) in accepted
+        sidecar_language(sidecar, path).lower() in accepted
         for sidecar in sidecar_subtitles(path)
     ) or any(
-        stream.get("tags", {}).get("language") in accepted
+        (stream.get("tags", {}).get("language") or "").lower() in accepted
         for stream in subtitle_streams(path)
     )
 
@@ -725,16 +775,36 @@ def download_caption(client, root, video, dest, lang):
     return "downloaded"
 
 
-def queue_captions(root, args):
-    """Download `args.lang` subtitles for every video lacking them."""
+def verified_language(client, lang):
+    """`lang` as OpenSubtitles spells it. Exits if it's unsupported;
+    if the list can't be fetched, `lang` is used unchecked."""
+    try:
+        known = client.languages()
+    except (HTTPError, URLError, OSError, ValueError, KeyError) as exc:
+        warn(f"Couldn't fetch OpenSubtitles' languages ({exc}); using "
+             f"{lang!r} unchecked.")
+        return lang
+    if lang.lower() not in known:
+        sys.exit(f"Error: OpenSubtitles has no {lang!r} subtitles. Codes: "
+                 f"{', '.join(sorted(known.values()))}")
+    return known[lang.lower()]
+
+
+def caption_setup(args):
+    """(client, language) for downloading subtitles, or None if
+    there's no API key. Exits on an unsupported --sub-lang."""
     client = opensubtitles_client(args)
     if client is None:
-        return
+        return None
+    return client, verified_language(client, args.sub_lang)
+
+
+def queue_captions(root, client, lang, captions_dir):
+    """Download `lang` subtitles for every video lacking them."""
     counts = Counter(
         download_caption(
             client, root, video,
-            caption_file(args.captions_dir, root, video, args.lang),
-            args.lang,
+            caption_file(captions_dir, root, video, lang), lang,
         )
         for video in iter_videos(root)
     )
@@ -990,8 +1060,9 @@ def add_caption_args(scan_p):
         help="Don't download subtitles.",
     )
     scan_p.add_argument(
-        "--lang", default="en",
-        help="Two-letter subtitle language (default: %(default)s)",
+        "--sub-lang", default="en", type=subtitle_language,
+        help="Subtitle language as OpenSubtitles codes it, e.g. fr or "
+             "pt-BR (default: %(default)s)",
     )
     add_dir_arg(scan_p, "--captions-dir", DEFAULT_CAPTIONS_DIR,
                 "Where to save downloaded subtitles")

@@ -257,7 +257,7 @@ def test_find_subtitle_prefers_hash_match(tmf, fake_api, monkeypatch):
 def scan_args(root, tmp_path, lang="en"):
     return Namespace(
         root=str(root), queue=str(tmp_path / "q.yml"), tmdb_api_key=None,
-        no_tvmaze=True, no_captions=False, lang=lang,
+        no_tvmaze=True, no_captions=False, sub_lang=lang,
         captions_dir=str(tmp_path / "captions"),
         opensubtitles_api_key="key", opensubtitles_username=None,
     )
@@ -270,8 +270,19 @@ def apply_args(root, tmp_path, dry_run=False):
     )
 
 
+LANGUAGES = {"data": [
+    {"language_code": code, "language_name": code}
+    for code in ("en", "fr", "pt-BR", "pt-PT", "zh-CN")
+]}
+
+
+def languages(_params, _body):
+    return LANGUAGES
+
+
 def subtitle_api(fake_api):
     return fake_api(
+        infos_languages=languages,
         subtitles=lambda params, body: {
             "data": [] if "moviehash" in params else [subtitle(9)],
         },
@@ -333,7 +344,8 @@ def test_apply_embeds_captions(tmf, fake_api, tmp_path, capsys):
 def test_scan_captions_not_found(tmf, fake_api, tmp_path, capsys):
     root = tmp_path / "root"
     make_video(root / "Heat" / "Heat.mkv")
-    fake_api(subtitles=lambda params, body: {"data": []})
+    fake_api(infos_languages=languages,
+             subtitles=lambda params, body: {"data": []})
     tmf.run_scan(scan_args(root, tmp_path, lang="fr"))
     out, err = capsys.readouterr()
     assert "No fr subtitles found" in err
@@ -349,3 +361,50 @@ def test_orphan_caption_is_reported(tmf, tmp_path, capsys):
     srt.write_bytes(SRT)
     assert tmf.apply_captions(root, tmp_path / "captions", False) == 0
     assert "No video for queued subtitles" in capsys.readouterr().err
+
+
+def test_verified_language(tmf, fake_api, capsys):
+    fake_api(infos_languages=languages)
+    client = tmf.OpenSubtitles("k")
+    assert tmf.verified_language(client, "PT-br") == "pt-BR"
+    with pytest.raises(SystemExit, match="no 'de' subtitles.*pt-BR"):
+        tmf.verified_language(client, "de")
+
+
+def test_verified_language_unreachable(tmf, fake_api, capsys):
+    def down(*_args):
+        raise HTTPError("url", 503, "Down", {}, None)
+    fake_api(infos_languages=down)
+    assert tmf.verified_language(tmf.OpenSubtitles("k"), "de") == "de"
+    assert "using 'de' unchecked" in capsys.readouterr().err
+
+
+@needs_ffmpeg
+def test_scan_rejects_language_before_scanning(tmf, fake_api, tmp_path):
+    root = tmp_path / "root"
+    (root / "Heat").mkdir(parents=True)
+    (root / "Heat" / "Heat.mkv").touch()
+    api = fake_api(infos_languages=languages)
+    with pytest.raises(SystemExit):
+        tmf.run_scan(scan_args(root, tmp_path, lang="de"))
+    assert not (tmp_path / "q.yml").exists()
+    assert api.requests_to("/subtitles") == []
+
+
+@needs_ffmpeg
+def test_regional_captions(tmf, fake_api, tmp_path, capsys):
+    root = tmp_path / "root"
+    movie = make_video(root / "Heat" / "Heat (1995).mkv")
+    api = subtitle_api(fake_api)
+    tmf.run_scan(scan_args(root, tmp_path, lang="pt-BR"))
+    assert api.calls[0][0].endswith("/infos/languages")
+    assert all(c[1]["languages"] == "pt-BR"
+               for c in api.requests_to("/subtitles"))
+    srt = tmp_path / "captions" / "Heat" / "Heat (1995).pt-BR.srt"
+    assert srt.read_bytes() == SRT
+
+    tmf.run_apply(apply_args(root, tmp_path))
+    streams = tmf.subtitle_streams(movie)
+    assert [s["tags"]["language"] for s in streams] == ["por"]
+    assert tmf.has_subtitles(movie, "pt-BR")
+    assert not tmf.has_subtitles(movie, "fr")
