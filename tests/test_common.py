@@ -9,7 +9,8 @@ from common.queue import (
     write_queue_entry,
 )
 from common.text import (
-    best_fuzzy_match, leading_int, render_filename, titles_match,
+    best_fuzzy_match, leading_int, render_filename, should_replace,
+    titles_match,
 )
 from conftest import write_queue
 
@@ -21,9 +22,28 @@ def test_leading_int():
     assert leading_int(None) is None
 
 
-def test_titles_match_tolerates_small_differences():
-    assert titles_match("Diversity Day", "diversity day!")
-    assert not titles_match("Pilot", "The Alliance")
+@pytest.mark.parametrize("filename, title", [
+    ("diversity day", "Diversity Day!"),
+    ("Up", "Up!"),
+    ("M.A.S.H", "MASH"),
+    ("Whats Up Doc", "What's Up, Doc?"),
+    ("!!!", "!!!"),
+])
+def test_titles_match_ignores_punctuation(filename, title):
+    assert titles_match(filename, title)
+
+
+@pytest.mark.parametrize("filename, title", [
+    ("Heat", "Heap"), ("Up", "Us"), ("Pilot", "The Alliance"),
+    ("!!!", "???"),
+])
+def test_titles_match_rejects_real_differences(filename, title):
+    assert not titles_match(filename, title)
+
+
+def test_should_replace_keeps_punctuation_fixes():
+    assert should_replace("What's Up, Doc?", "Whats Up Doc")
+    assert not should_replace("Pilot", "pilot")
 
 
 def test_best_fuzzy_match():

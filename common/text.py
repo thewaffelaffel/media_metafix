@@ -5,8 +5,8 @@ import re
 
 FUZZY_SAME_ENOUGH = 0.92      # this similar counts as "already correct"
 FUZZY_MATCH_THRESHOLD = 0.6   # min similarity to accept a search match
-TITLE_CHAR_DIFF_THRESHOLD = 3  # max differing chars for filename == title
 
+PUNCTUATION_RE = re.compile(r"[\W_]+")
 ILLEGAL_FILENAME_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
@@ -18,32 +18,30 @@ def leading_int(value):
     return int(match.group(1)) if match else None
 
 
-def fuzzy_ratio(a, b):
+def comparable(text, strict=False):
+    """Casefolded `text`, minus punctuation and spaces unless `strict`
+    (or unless nothing else is left)."""
+    text = text.casefold().strip()
+    return text if strict else PUNCTUATION_RE.sub("", text) or text
+
+
+def fuzzy_ratio(a, b, strict=False):
+    """Similarity from 0 to 1, ignoring case and, unless `strict`,
+    punctuation (which filenames and folder names often lose)."""
     if not a or not b:
         return 0.0
-    a, b = a.lower().strip(), b.lower().strip()
+    a, b = comparable(a, strict), comparable(b, strict)
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def char_diff_count(a, b):
-    """Rough count of differing characters between two strings."""
-    matcher = difflib.SequenceMatcher(None, a, b)
-    return sum(
-        max(i2 - i1, j2 - j1)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
-        if tag != "equal"
-    )
-
-
 def titles_match(a, b):
-    """True if `a` and `b` differ by at most a few characters."""
-    diff = char_diff_count(a.lower().strip(), b.lower().strip())
-    return diff <= TITLE_CHAR_DIFF_THRESHOLD
+    return fuzzy_ratio(a, b) >= FUZZY_SAME_ENOUGH
 
 
 def should_replace(new, current):
-    """True if `new` differs enough from `current` to queue."""
-    return fuzzy_ratio(new, current) < FUZZY_SAME_ENOUGH
+    """True if `new` differs enough from `current` to queue. Strict,
+    so tags still get punctuation fixes."""
+    return fuzzy_ratio(new, current, strict=True) < FUZZY_SAME_ENOUGH
 
 
 def best_fuzzy_match(candidates, target):
