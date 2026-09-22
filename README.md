@@ -98,7 +98,9 @@ MP4/AVI). AVI can't hold episode tags, so `apply` warns you to
 music_metafix, tv_metafix   the scripts
 common/                     shared code: queue I/O, check framework,
                             .mmfignore/backups, ffmpeg, CLI helpers
-tests/                      pytest suite (ffmpeg tests skip without it)
+tests/                      pytest suite: APIs are faked and network
+                            access is blocked; ffmpeg tests skip
+                            without ffmpeg
 ```
 
 Run the tests with `pip install pytest && pytest tests`.

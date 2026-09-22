@@ -1,4 +1,5 @@
 import shutil
+import socket
 import subprocess
 import sys
 from importlib.machinery import SourceFileLoader
@@ -21,6 +22,14 @@ def load_script(name):
     module = module_from_spec(spec_from_loader(name, loader))
     loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Fail any test that tries to reach a real API."""
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("tests must not use the network")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
 
 
 @pytest.fixture(scope="session")

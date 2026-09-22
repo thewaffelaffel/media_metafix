@@ -802,7 +802,6 @@ def run_fingerprint(args):
         return
 
     root = Path(args.root)
-    root = Path(args.root)
     entries = load_queue(args.queue)
 
     counts = Counter()
