@@ -8,12 +8,13 @@ either a show or a movie series (a root may mix both):
 
 Folder names are trusted for show/season and series. Episode titles and
 numbers come from TVmaze; movie titles and years from TMDB, falling
-back to the filename.
+back to the filename. Missing subtitles come from OpenSubtitles.
 
-scan only queues changes (tmp/changes.yml by default, relative to the
-current directory, not root). Steps that modify files take --dry-run
-to print what they'd change instead. A ".mmfignore" file in root
-(".gitignore" syntax) excludes matches from every step.
+scan only queues changes: metadata to tmp/changes.yml and subtitles to
+tmp/captions (tmp is relative to the current directory, not root).
+Steps that modify files take --dry-run to print what they'd change
+instead. A ".mmfignore" file in root (".gitignore" syntax) excludes
+matches from every step.
 
 See README.md for setup and examples.
 """
@@ -29,16 +30,17 @@ from urllib.error import HTTPError, URLError
 
 from common import check as chk
 from common.cli import (
-    SCANNED_ROOT_HELP, add_check_parser, add_convert_parser, add_dry_run_arg,
-    add_queue_arg, add_root_arg, build_parser, run_step,
+    DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_check_parser, add_convert_parser,
+    add_dir_arg, add_dry_run_arg, add_queue_arg, add_root_arg, build_parser,
+    run_step,
 )
 from common.ffmpeg import (
     ffprobe_json, replace_with, require_ffmpeg, run_ffmpeg,
     temp_output_path,
 )
 from common.files import (
-    iter_dirs, iter_files, iter_kept, load_mmfignore, move, rename_target,
-    with_extension,
+    iter_dirs, iter_files, iter_kept, iter_queued_files, load_mmfignore,
+    move, rename_target, with_extension,
 )
 from common.http import cached, fetch, fetch_json
 from common.queue import (
@@ -71,6 +73,8 @@ TAG_KEYS = {
     "title": "title", "series": "collection", "year": "date",
 }
 ALBUM_TAG_KEYS = dict(TAG_KEYS, series="album")
+
+DEFAULT_CAPTIONS_DIR = str(Path(DEFAULT_TMP_DIR) / "captions")
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +398,8 @@ def compute_scan_change(root, path, args, cache):
 
 
 def run_scan(args):
+    """Queue changes for every video, and download subtitles unless
+    --no-captions."""
     if not require_ffmpeg("read tags"):
         return
     if not args.tmdb_api_key:
@@ -405,11 +411,13 @@ def run_scan(args):
         lambda path: compute_scan_change(root, path, args, cache),
         "Video",
     )
+    if not args.no_captions:
+        queue_captions(root, args)
     print_scan_summary(counts, args)
 
 
 # ---------------------------------------------------------------------------
-# OpenSubtitles: file hashes (fingerprint) and subtitles (caption)
+# OpenSubtitles: file hashes and subtitles
 # ---------------------------------------------------------------------------
 
 OPENSUBTITLES_URL = "https://api.opensubtitles.com/api/v1"
@@ -554,17 +562,8 @@ def run_fingerprint(args):
 
 
 # ---------------------------------------------------------------------------
-# apply
-# ---------------------------------------------------------------------------
-
-def run_apply(args):
-    root = Path(args.root)
-    verify_queue_root(args.queue, root)
-    apply_queue(root, args.queue, write_tags, args.dry_run)
-
-
-# ---------------------------------------------------------------------------
-# caption
+# Subtitles: `scan` downloads them to tmp/captions, mirroring root;
+# `apply` embeds them.
 # ---------------------------------------------------------------------------
 
 # ISO 639-1 -> ISO 639-2 codes (first is written; any is recognized).
@@ -673,44 +672,99 @@ def save_subtitle(path, data, lang):
     return path
 
 
-def caption_one_file(client, root, path, lang, dry_run=False):
-    """"present", "missing", "captioned" or "error" for one file. A
-    dry run searches but doesn't download (downloads are limited)."""
+def caption_file(captions_dir, root, video, lang):
+    """Where `scan` saves `video`'s subtitles."""
+    rel_dir = video.parent.relative_to(root)
+    return Path(captions_dir) / rel_dir / f"{video.stem}.{lang}.srt"
+
+
+def download_caption(client, root, video, dest, lang):
+    """Save `video`'s best `lang` subtitles to `dest`. Returns
+    "downloaded", "present", "missing" or "error"."""
     try:
-        if has_subtitles(path, lang):
+        if dest.exists() or has_subtitles(video, lang):
             return "present"
-        file_id = find_subtitle(client, path, root, lang)
+        file_id = find_subtitle(client, video, root, lang)
         if file_id is None:
-            warn(f"No {lang} subtitles found for {path}")
+            warn(f"No {lang} subtitles found for {video}")
             return "missing"
-        if not dry_run:
-            path = save_subtitle(path, client.download(file_id), lang)
+        data = client.download(file_id)
     except (HTTPError, URLError, OSError, RuntimeError, KeyError,
             ValueError) as exc:
-        warn(f"Failed to caption {path}: {exc}")
+        warn(f"Subtitle download failed for {video}: {exc}")
         return "error"
-    report("caption", path, dry_run)
-    return "captioned"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    print(f"Subtitles: {dest}")
+    return "downloaded"
 
 
-def run_caption(args):
-    """Download and embed `args.lang` subtitles for every video that
-    doesn't already have them."""
-    if not require_ffmpeg("embed subtitles"):
-        return
+def queue_captions(root, args):
+    """Download `args.lang` subtitles for every video lacking them."""
     client = opensubtitles_client(args)
     if client is None:
         return
-    root = Path(args.root)
     counts = Counter(
-        caption_one_file(client, root, path, args.lang, args.dry_run)
-        for path in iter_videos(root)
+        download_caption(
+            client, root, video,
+            caption_file(args.captions_dir, root, video, args.lang),
+            args.lang,
+        )
+        for video in iter_videos(root)
     )
     print(
-        f"\n{counts['captioned']} {outcome('caption', args.dry_run)}, "
-        f"{counts['present']} already had subtitles, {counts['missing']} "
-        f"not found, {counts['error']} error(s)."
+        f"\n{counts['downloaded']} subtitle file(s) downloaded, "
+        f"{counts['present']} already present, {counts['missing']} not "
+        f"found, {counts['error']} error(s)."
     )
+
+
+def caption_target(srt, dest_dir):
+    """(video, lang) for a queued "<stem>.<lang>.srt", or None."""
+    stem, _, lang = srt.name[:-len(".srt")].rpartition(".")
+    for video in filter(is_video, iter_files(dest_dir)):
+        if video.stem == stem:
+            return video, lang
+    return None
+
+
+def apply_caption(srt, video, lang, dry_run):
+    """Embed `srt` in `video` unless it already has `lang` subtitles.
+    Returns True if it did (or would)."""
+    if has_subtitles(video, lang):
+        print(f"Keeping existing {lang} subtitles: {video}")
+        return False
+    dest = video if dry_run else save_subtitle(video, srt.read_bytes(), lang)
+    report("caption", dest, dry_run)
+    return True
+
+
+def apply_captions(root, captions_dir, dry_run):
+    """Embed every queued subtitle file. Returns how many were."""
+    captioned = 0
+    for srt, dest_dir in iter_queued_files(captions_dir, root):
+        target = caption_target(srt, dest_dir)
+        if target is None:
+            warn(f"No video for queued subtitles: {srt}")
+            continue
+        try:
+            captioned += apply_caption(srt, *target, dry_run)
+        except (OSError, RuntimeError) as exc:
+            warn(f"Failed to caption {target[0]}: {exc}")
+    return captioned
+
+
+# ---------------------------------------------------------------------------
+# apply
+# ---------------------------------------------------------------------------
+
+def run_apply(args):
+    root = Path(args.root)
+    verify_queue_root(args.queue, root)
+    apply_queue(root, args.queue, write_tags, args.dry_run)
+    captioned = apply_captions(root, args.captions_dir, args.dry_run)
+    if captioned:
+        print(f"{captioned} video(s) {outcome('caption', args.dry_run)}.")
 
 
 # ---------------------------------------------------------------------------
@@ -909,9 +963,23 @@ def add_opensubtitles_args(subparser, login=False):
     )
 
 
+def add_caption_args(scan_p):
+    scan_p.add_argument(
+        "--no-captions", action="store_true",
+        help="Don't download subtitles.",
+    )
+    scan_p.add_argument(
+        "--lang", default="en",
+        help="Two-letter subtitle language (default: %(default)s)",
+    )
+    add_dir_arg(scan_p, "--captions-dir", DEFAULT_CAPTIONS_DIR,
+                "Where to save downloaded subtitles")
+    add_opensubtitles_args(scan_p, login=True)
+
+
 def add_scan_args(subparsers):
     scan_p = subparsers.add_parser(
-        "scan", help="Look up metadata and queue changes.",
+        "scan", help="Look up metadata; queue changes and subtitles.",
     )
     add_root_arg(scan_p, ROOT_HELP)
     add_queue_arg(scan_p, "Where to write queued changes")
@@ -923,6 +991,7 @@ def add_scan_args(subparsers):
         "--no-tvmaze", action="store_true",
         help="Don't look episodes up on TVmaze.",
     )
+    add_caption_args(scan_p)
 
 
 def add_fingerprint_args(subparsers):
@@ -937,24 +1006,13 @@ def add_fingerprint_args(subparsers):
 
 def add_apply_args(subparsers):
     apply_p = subparsers.add_parser(
-        "apply", help="Write a queued changes file to disk.",
+        "apply", help="Write queued changes and subtitles to disk.",
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
+    add_dir_arg(apply_p, "--captions-dir", DEFAULT_CAPTIONS_DIR,
+                "Where scan saved subtitles")
     add_dry_run_arg(apply_p)
-
-
-def add_caption_args(subparsers):
-    caption_p = subparsers.add_parser(
-        "caption", help="Download and embed subtitles.",
-    )
-    add_root_arg(caption_p, ROOT_HELP)
-    caption_p.add_argument(
-        "--lang", default="en",
-        help="Two-letter subtitle language (default: %(default)s)",
-    )
-    add_opensubtitles_args(caption_p, login=True)
-    add_dry_run_arg(caption_p)
 
 
 def add_convert_args(subparsers):
@@ -985,7 +1043,7 @@ def add_rename_args(subparsers):
 def build_arg_parser():
     return build_parser("tv_metafix", __doc__, (
         add_scan_args, add_check_parser, add_fingerprint_args,
-        add_apply_args, add_caption_args, add_convert_args,
+        add_apply_args, add_convert_args,
         add_rename_args,
     ))
 
@@ -995,7 +1053,6 @@ STEP_HANDLERS = {
     "check": run_check,
     "fingerprint": run_fingerprint,
     "apply": run_apply,
-    "caption": run_caption,
     "convert": run_convert,
     "rename": run_rename,
 }

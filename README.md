@@ -28,7 +28,7 @@ Optional settings, each unlocking the steps listed:
   for movies; without it, titles and years come from filenames like
   `Heat (1995).mkv`).
 - `TMF_OPENSUBTITLES_API_KEY`: free at opensubtitles.com/consumers (TMF
-  `fingerprint` and `caption`).
+  subtitles in `scan`, and `fingerprint`).
 - `TMF_OPENSUBTITLES_USERNAME` / `_PASSWORD`: optional login, raising
   the daily subtitle download limit.
 
@@ -44,8 +44,12 @@ tv_metafix apply /videos --dry-run  # preview what apply would write
 tv_metafix apply /videos            # write the (edited) queue
 ```
 
-`scan` only writes a YAML queue for you to review. Delete a field to
-skip that change, or an entry to skip that file. `check` flags things
+`scan` changes nothing in root. It writes a YAML queue for you to
+review, and downloads album art (MMF) or missing subtitles (TMF) into
+`tmp/art/` or `tmp/captions/`, mirroring root's folders. In the queue,
+delete a field to skip that change, or an entry to skip that file;
+delete a downloaded file to skip it too. `apply` writes the queue,
+then copies in the art or embeds the subtitles. `check` flags things
 like duplicate or missing track/episode numbers, filenames that don't
 match the new number or title, and blank or inconsistent fields. For
 each, you can edit the queue, skip it, or mark it `# OK` for good.
@@ -53,7 +57,6 @@ each, you can edit the queue, skip it, or mark it `# OK` for good.
 Other steps (run any step with `-h` for its options):
 
 - MMF `normalize <root>`: even out loudness.
-- TMF `caption <root> [--lang en]`: download and embed subtitles.
 - `convert <root> <from> <to>`: re-encode (MMF) or remux (TMF), keeping
   tags, e.g. `wma mp3` or `avi mkv`.
 - `rename <root> ...`: rename files from their tags, e.g. MMF
@@ -70,9 +73,14 @@ Other steps (run any step with `-h` for its options):
 - **TMF `fingerprint`** looks files up by their OpenSubtitles hash. No
   free service fingerprints video content, so only unmodified copies of
   known releases are identified; re-encoded files show as "unknown".
-- **TMF `caption`** embeds subtitles in MKV, MP4, M4V, MOV and WebM.
-  Other containers, like AVI, get a `name.<lang>.srt` file alongside.
-  Files that already have subtitles in that language are skipped.
+- **Album art** is only downloaded for albums without an `art.jpg`,
+  and `apply` never replaces an existing one.
+- **Subtitles** (`scan --lang en` by default, `--no-captions` to skip)
+  are only downloaded for videos without subtitles in that language.
+  Downloads count against OpenSubtitles' daily limit, and a rescan
+  reuses files already in `tmp/captions/`. `apply` embeds them in MKV,
+  MP4, M4V, MOV and WebM; other containers, like AVI, get a
+  `name.<lang>.srt` file alongside.
 
 TMF tags are `title`, `show`, `season_number`, `episode_sort`, `date`
 and `collection` (the series; `album` in MP4/AVI). AVI can't hold the
@@ -80,11 +88,9 @@ episode tags, so `apply` suggests converting those files to MKV.
 
 ## Safety
 
-- `apply`, `normalize`, `caption`, `convert` and `rename` take
-  `--dry-run`, which prints each change without making it. Nothing is
-  backed up, so dry-run first and keep your own backups: a real run
-  can't be undone. (`caption --dry-run` still searches OpenSubtitles,
-  but doesn't download anything.)
+- `apply`, `normalize`, `convert` and `rename` take `--dry-run`, which
+  prints each change without making it. Nothing is backed up, so
+  dry-run first and keep your own backups: a real run can't be undone.
 - `tmp/` is relative to the current directory, not root. The queue
   records its root, and `apply` refuses to run against another one.
 - A `.mmfignore` file in root (`.gitignore` syntax) excludes files and

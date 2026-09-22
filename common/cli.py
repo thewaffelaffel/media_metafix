@@ -21,6 +21,13 @@ def add_queue_arg(subparser, help_text):
     )
 
 
+def add_dir_arg(subparser, flag, default, help_text):
+    """A `flag` option naming a working directory under tmp/."""
+    subparser.add_argument(
+        flag, default=default, help=f"{help_text} (default: %(default)s)",
+    )
+
+
 def add_dry_run_arg(subparser):
     subparser.add_argument(
         "--dry-run", action="store_true",

@@ -257,3 +257,31 @@ def test_run_fingerprint_needs_key(mmf, monkeypatch, capsys):
     monkeypatch.setattr(mmf, "acoustid", SimpleNamespace())
     mmf.run_fingerprint(Namespace(acoustid_api_key=None))
     assert "no AcoustID API key" in capsys.readouterr().err
+
+
+def test_queue_album_art_skips_albums_with_art(mmf, fake_mb, monkeypatch,
+                                               tmp_path):
+    monkeypatch.setattr(mmf, "fetch_cover_art", lambda _id: jpeg_bytes())
+    root = tmp_path / "root"
+    (root / "A" / "Has Art").mkdir(parents=True)
+    (root / "A" / "Has Art" / "art.jpg").write_bytes(b"mine")
+    (root / "A" / "No Art").mkdir(parents=True)
+    art_dir = tmp_path / "art"
+    mmf.queue_album_art(root, art_dir, "art.jpg", "me@example.com")
+    assert fake_mb.searches == [("A", "No Art")]
+    assert (art_dir / "A" / "No Art" / "art.jpg").exists()
+    assert not (art_dir / "A" / "Has Art").exists()
+
+
+def test_apply_album_art_keeps_existing(mmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    for album in ("Has Art", "No Art"):
+        (root / "A" / album).mkdir(parents=True)
+        queued = tmp_path / "art" / "A" / album / "art.jpg"
+        queued.parent.mkdir(parents=True)
+        queued.write_bytes(b"new")
+    (root / "A" / "Has Art" / "art.jpg").write_bytes(b"mine")
+    assert mmf.apply_album_art(root, tmp_path / "art") == 1
+    assert (root / "A" / "Has Art" / "art.jpg").read_bytes() == b"mine"
+    assert (root / "A" / "No Art" / "art.jpg").read_bytes() == b"new"
+    assert "Keeping existing album art" in capsys.readouterr().out

@@ -8,10 +8,11 @@ come from MusicBrainz, matched by the filename's track number or else
 its title. A recording's full credit (main + featured artists) goes in
 a separate "artists" tag; "artist" stays as the folder name.
 
-scan only queues changes (tmp/changes.yml by default, relative to the
-current directory, not root). Steps that modify files take --dry-run
-to print what they'd change instead. A ".mmfignore" file in root
-(".gitignore" syntax) excludes matches from every step.
+scan only queues changes: metadata to tmp/changes.yml and album art to
+tmp/art (tmp is relative to the current directory, not root). Steps
+that modify files take --dry-run to print what they'd change instead.
+A ".mmfignore" file in root (".gitignore" syntax) excludes matches
+from every step.
 
 See README.md for setup and examples.
 """
@@ -48,14 +49,15 @@ from mutagen.id3 import TALB, TIT2, TPE1, TRCK, TXXX
 from common import check as chk
 from common.cli import (
     DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_check_parser, add_convert_parser,
-    add_dry_run_arg, add_queue_arg, add_root_arg, build_parser, run_step,
+    add_dir_arg, add_dry_run_arg, add_queue_arg, add_root_arg, build_parser,
+    run_step,
 )
 from common.ffmpeg import (
     replace_with, require_ffmpeg, run_ffmpeg, temp_output_path,
 )
 from common.files import (
-    is_ignored, iter_dirs, iter_files, iter_kept, load_mmfignore, move,
-    rename_target, with_extension,
+    iter_dirs, iter_files, iter_kept, iter_queued_files, load_mmfignore,
+    move, rename_target, with_extension,
 )
 from common.http import cached
 from common.queue import (
@@ -365,44 +367,33 @@ def album_art_available(contact):
 
 
 def queue_album_art(root, art_dir, filename, contact):
-    """Download cover art for every album to art_dir/artist/album."""
+    """Download cover art to art_dir/artist/album for every album
+    without a `filename` of its own."""
     if not album_art_available(contact):
         return
     root = Path(root)
     spec = load_mmfignore(root)
-    for artist_name, album_name, _album_dir in iter_albums(root, spec):
+    for artist_name, album_name, album_dir in iter_albums(root, spec):
+        if (album_dir / filename).exists():
+            continue
         dest_dir = Path(art_dir) / artist_name / album_name
         download_album_art(artist_name, album_name, dest_dir, filename)
 
 
 def apply_album_art(root, art_dir, dry_run=False):
-    """Copy queued art onto matching albums in root. Returns the
-    number of files copied."""
-    root = Path(root)
-    art_dir = Path(art_dir)
-    if not art_dir.exists():
-        return 0
-    spec = load_mmfignore(root)
-    applied = 0
-    for artist_dir in iter_dirs(art_dir):
-        for album_dir in iter_dirs(artist_dir):
-            dest_dir = root / artist_dir.name / album_dir.name
-            if not dest_dir.is_dir():
-                warn(f"No matching album for queued art: {album_dir}")
-            elif not is_ignored(spec, root, dest_dir):
-                applied += copy_files(album_dir, dest_dir, dry_run)
-    return applied
-
-
-def copy_files(src_dir, dest_dir, dry_run):
-    """Copy every file in `src_dir` into `dest_dir`; returns the
-    count."""
-    files = iter_files(src_dir)
-    for src in files:
+    """Copy queued art into matching albums, never replacing existing
+    art. Returns the number of files copied."""
+    copied = 0
+    for art, dest_dir in iter_queued_files(art_dir, root):
+        dest = dest_dir / art.name
+        if dest.exists():
+            print(f"Keeping existing album art: {dest}")
+            continue
         if not dry_run:
-            shutil.copyfile(src, dest_dir / src.name)
-        report("copy", dest_dir / src.name, dry_run)
-    return len(files)
+            shutil.copyfile(art, dest)
+        report("copy", dest, dry_run)
+        copied += 1
+    return copied
 
 
 # ---------------------------------------------------------------------------
@@ -868,28 +859,26 @@ def run_check_step(args):
 ROOT_HELP = "Root folder containing artist/album/song files."
 
 
-def add_art_dir_arg(subparser, help_text):
-    subparser.add_argument(
-        "--art-dir", default=DEFAULT_ART_DIR,
-        help=f"{help_text} (default: %(default)s)",
+def add_album_art_args(scan_p):
+    scan_p.add_argument(
+        "--no-art", action="store_true",
+        help="Don't download album art.",
+    )
+    add_dir_arg(scan_p, "--art-dir", DEFAULT_ART_DIR,
+                "Where to save downloaded album art")
+    scan_p.add_argument(
+        "--art-filename", default=ALBUM_ART_FILENAME,
+        help="Album art filename (default: %(default)s)",
     )
 
 
 def add_scan_args(subparsers):
     scan_p = subparsers.add_parser(
-        "scan", help="Search MusicBrainz and queue metadata/art changes.",
+        "scan", help="Search MusicBrainz; queue changes and album art.",
     )
     add_root_arg(scan_p, ROOT_HELP)
     add_queue_arg(scan_p, "Where to write queued changes")
-    scan_p.add_argument(
-        "--no-art", action="store_true",
-        help="Don't download album art.",
-    )
-    add_art_dir_arg(scan_p, "Where to save downloaded album art")
-    scan_p.add_argument(
-        "--art-filename", default=ALBUM_ART_FILENAME,
-        help="Album art filename (default: %(default)s)",
-    )
+    add_album_art_args(scan_p)
     scan_p.add_argument(
         "--musicbrainz-contact",
         default=os.environ.get("MMF_MUSICBRAINZ_CONTACT"),
@@ -921,7 +910,8 @@ def add_apply_args(subparsers):
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
-    add_art_dir_arg(apply_p, "Where scan saved album art")
+    add_dir_arg(apply_p, "--art-dir", DEFAULT_ART_DIR,
+                "Where scan saved album art")
     add_dry_run_arg(apply_p)
 
 

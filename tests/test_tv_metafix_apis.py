@@ -135,7 +135,7 @@ def test_scan_uses_tmdb(tmf, fake_api, tmp_path):
     queue = tmp_path / "q.yml"
     tmf.run_scan(Namespace(
         root=str(root), queue=str(queue), tmdb_api_key="key",
-        no_tvmaze=True,
+        no_tvmaze=True, no_captions=True,
     ))
     assert tmf.load_queue(queue) == {
         "Harry Potter/Sorcerers Stone (2001).mkv": {
@@ -254,25 +254,44 @@ def test_find_subtitle_prefers_hash_match(tmf, fake_api, monkeypatch):
     assert api.calls[0][1] == {"languages": "en", "moviehash": "abc"}
 
 
-@needs_ffmpeg
-def test_caption(tmf, fake_api, tmp_path, capsys):
-    root = tmp_path / "root"
-    episode = make_video(root / "Show" / "Season 2" / "S02E05 - X.mkv")
-    movie = make_video(root / "Heat" / "Heat (1995).avi")
-    api = fake_api(
+def scan_args(root, tmp_path, lang="en"):
+    return Namespace(
+        root=str(root), queue=str(tmp_path / "q.yml"), tmdb_api_key=None,
+        no_tvmaze=True, no_captions=False, lang=lang,
+        captions_dir=str(tmp_path / "captions"),
+        opensubtitles_api_key="key", opensubtitles_username=None,
+    )
+
+
+def apply_args(root, tmp_path, dry_run=False):
+    return Namespace(
+        root=str(root), queue=str(tmp_path / "q.yml"), dry_run=dry_run,
+        captions_dir=str(tmp_path / "captions"),
+    )
+
+
+def subtitle_api(fake_api):
+    return fake_api(
         subtitles=lambda params, body: {
             "data": [] if "moviehash" in params else [subtitle(9)],
         },
         download=lambda params, body: {"link": "https://dl.example/9"},
     )
-    args = Namespace(
-        root=str(root), lang="en", opensubtitles_api_key="key",
-        opensubtitles_username=None, dry_run=False,
-    )
-    tmf.run_caption(args)
-    assert "2 captioned" in capsys.readouterr().out
-    assert tmf.has_subtitles(episode, "en")
-    assert (movie.parent / "Heat (1995).en.srt").read_bytes() == SRT
+
+
+@needs_ffmpeg
+def test_scan_downloads_captions(tmf, fake_api, tmp_path, capsys):
+    root = tmp_path / "root"
+    episode = make_video(root / "Show" / "Season 2" / "S02E05 - X.mkv")
+    make_video(root / "Heat" / "Heat (1995).avi")
+    api = subtitle_api(fake_api)
+    tmf.run_scan(scan_args(root, tmp_path))
+    captions = tmp_path / "captions"
+    assert (captions / "Show" / "Season 2" / "S02E05 - X.en.srt"
+            ).read_bytes() == SRT
+    assert (captions / "Heat" / "Heat (1995).en.srt").read_bytes() == SRT
+    assert "2 subtitle file(s) downloaded" in capsys.readouterr().out
+    assert not tmf.has_subtitles(episode, "en")  # scan changes nothing
 
     searches = [c[1] for c in api.requests_to("/subtitles")
                 if "query" in c[1]]
@@ -282,34 +301,51 @@ def test_caption(tmf, fake_api, tmp_path, capsys):
             "episode_number": 5, "type": "episode"} in searches
 
     api.calls.clear()
-    tmf.run_caption(args)
-    assert "2 already had subtitles" in capsys.readouterr().out
-    assert api.calls == []
+    tmf.run_scan(scan_args(root, tmp_path))
+    assert "2 already present" in capsys.readouterr().out
+    assert api.requests_to("/download") == []
 
 
 @needs_ffmpeg
-def test_caption_not_found(tmf, fake_api, tmp_path, capsys):
+def test_apply_embeds_captions(tmf, fake_api, tmp_path, capsys):
+    root = tmp_path / "root"
+    episode = make_video(root / "Show" / "Season 2" / "S02E05 - X.mkv")
+    movie = make_video(root / "Heat" / "Heat (1995).avi")
+    subtitle_api(fake_api)
+    tmf.run_scan(scan_args(root, tmp_path))
+    before = episode.read_bytes()
+
+    tmf.run_apply(apply_args(root, tmp_path, dry_run=True))
+    assert f"Would caption: {episode}" in capsys.readouterr().out
+    assert episode.read_bytes() == before
+
+    tmf.run_apply(apply_args(root, tmp_path))
+    assert "2 video(s) captioned." in capsys.readouterr().out
+    assert tmf.has_subtitles(episode, "en")
+    assert (movie.parent / "Heat (1995).en.srt").read_bytes() == SRT
+
+    tmf.run_apply(apply_args(root, tmp_path))
+    assert "Keeping existing en subtitles" in capsys.readouterr().out
+    assert len(tmf.subtitle_streams(episode)) == 1
+
+
+@needs_ffmpeg
+def test_scan_captions_not_found(tmf, fake_api, tmp_path, capsys):
     root = tmp_path / "root"
     make_video(root / "Heat" / "Heat.mkv")
     fake_api(subtitles=lambda params, body: {"data": []})
-    tmf.run_caption(Namespace(
-        root=str(root), lang="fr", opensubtitles_api_key="key",
-        opensubtitles_username=None, dry_run=False,
-    ))
+    tmf.run_scan(scan_args(root, tmp_path, lang="fr"))
     out, err = capsys.readouterr()
     assert "No fr subtitles found" in err
     assert "1 not found" in out
+    assert not (tmp_path / "captions").exists()
 
 
-@needs_ffmpeg
-def test_caption_dry_run_skips_download(tmf, fake_api, tmp_path, capsys):
+def test_orphan_caption_is_reported(tmf, tmp_path, capsys):
     root = tmp_path / "root"
-    movie = make_video(root / "Heat" / "Heat.mkv")
-    api = fake_api(subtitles=lambda params, body: {"data": [subtitle(9)]})
-    tmf.run_caption(Namespace(
-        root=str(root), lang="en", opensubtitles_api_key="key",
-        opensubtitles_username=None, dry_run=True,
-    ))
-    assert f"Would caption: {movie}" in capsys.readouterr().out
-    assert api.requests_to("/download") == []
-    assert not tmf.has_subtitles(movie, "en")
+    (root / "Heat").mkdir(parents=True)
+    srt = tmp_path / "captions" / "Heat" / "Gone.en.srt"
+    srt.parent.mkdir(parents=True)
+    srt.write_bytes(SRT)
+    assert tmf.apply_captions(root, tmp_path / "captions", False) == 0
+    assert "No video for queued subtitles" in capsys.readouterr().err

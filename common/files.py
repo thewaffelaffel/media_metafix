@@ -55,6 +55,22 @@ def iter_kept(spec, root, paths):
     return (p for p in paths if not is_ignored(spec, root, p))
 
 
+def iter_queued_files(queue_dir, root):
+    """(file, dest_dir) for each file `scan` saved under `queue_dir`,
+    where dest_dir is its mirror under root. Missing or ignored mirrors
+    are skipped."""
+    queue_dir, root = Path(queue_dir), Path(root)
+    if not queue_dir.is_dir():
+        return
+    spec = load_mmfignore(root)
+    for file in sorted(p for p in queue_dir.rglob("*") if p.is_file()):
+        dest_dir = root / file.parent.relative_to(queue_dir)
+        if not dest_dir.is_dir():
+            warn(f"No matching folder under root for {file}")
+        elif not is_ignored(spec, root, dest_dir):
+            yield file, dest_dir
+
+
 def rename_target(path, new_name):
     """`path` with `new_name`, or None (warned) if that's unchanged,
     taken or invalid."""
