@@ -5,8 +5,8 @@ import pytest
 from common import check as chk
 from common.files import iter_non_ignored_files, load_mmfignore
 from common.queue import (
-    build_queue_fields, load_queue, read_root_header, verify_queue_root,
-    write_queue_entry,
+    build_queue_fields, load_queue, print_change, read_root_header,
+    verify_queue_root, write_queue_entry,
 )
 from common.text import (
     best_fuzzy_match, leading_int, render_filename, titles_match,
@@ -72,6 +72,17 @@ def test_queue_round_trip(tmp_path):
     verify_queue_root(queue, tmp_path)
     with pytest.raises(SystemExit):
         verify_queue_root(queue, tmp_path / "other")
+
+
+def test_print_change_matches_queue(tmp_path, capsys):
+    args = ("A/b.mkv", {"title": "New", "year": 2001}, {"title": "Old"})
+    queue = tmp_path / "q.yml"
+    with open(queue, "w", encoding="utf-8") as f:
+        write_queue_entry(f, *args)
+    print_change(*args)
+    printed = capsys.readouterr().out
+    assert printed == queue.read_text()
+    assert "  title: New  # was: Old\n" in printed
 
 
 def test_check_always_skip_marks_ok(tmp_path, answer):
