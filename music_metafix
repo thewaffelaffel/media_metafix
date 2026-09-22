@@ -15,10 +15,10 @@ Pipeline, each step its own subcommand:
                                 fresh album art for review.
     check [queue]               Sanity-check a queued changes file, prompting
                                 for how to resolve anything suspicious.
-    fingerprint <root>          AcoustID sanity check: does each queued title
+    fingerprint <root> [queue]  AcoustID sanity check: does each queued title
                                 roughly match the audio? Prints mismatches, no
                                 prompts.
-    apply <root>                Write a queued changes file's metadata and
+    apply <root> [queue]        Write a queued changes file's metadata and
                                 album art to disk.
     normalize <root>            Loudness-normalize every track to a consistent
                                 volume.
@@ -26,12 +26,12 @@ Pipeline, each step its own subcommand:
                                 preserving metadata.
     rename <root> <format>      Rename files from a tag-rendered template.
 
-scan never writes directly -- changes are queued to YAML for review,
-optionally sanity-checked with check/fingerprint, then written with
-apply. Working files (queue, queued art, backups) live in "tmp" next
-to wherever the script runs, NOT inside root -- so scan stamps the
-queue with root's absolute path, and apply refuses to run against a
-different root.
+[queue] defaults to tmp/changes.yml. scan never writes directly --
+changes are queued to YAML for review, optionally sanity-checked with
+check/fingerprint, then written with apply. Working files (queue,
+queued art, backups) live in "tmp" next to wherever the script runs,
+NOT inside root -- so scan stamps the queue with root's absolute path,
+and apply refuses to run against a different root.
 
 apply/normalize/convert/rename back root up to tmp/backups first,
 unless --no-backup is given.
@@ -55,9 +55,9 @@ Usage:
     music_metafix scan /path/to/music/root
     music_metafix scan /path/to/music/root --no-art
     music_metafix check
-    music_metafix check tmp/changes.yml
     music_metafix fingerprint /path/to/music/root
     music_metafix apply /path/to/music/root
+    music_metafix apply /path/to/music/root custom-queue.yml
     music_metafix normalize /path/to/music/root
     music_metafix convert /path/to/music/root wma mp3
     music_metafix rename /path/to/music/root "%num - %title"
@@ -847,9 +847,9 @@ def print_scan_summary(counts, args):
         print(
             "Review it, then optionally:\n"
             f"  {sys.argv[0]} check {args.queue}\n"
-            f"  {sys.argv[0]} fingerprint {args.root} --queue {args.queue}\n"
+            f"  {sys.argv[0]} fingerprint {args.root} {args.queue}\n"
             "then apply with:\n"
-            f"  {sys.argv[0]} apply {args.root} --queue {args.queue}"
+            f"  {sys.argv[0]} apply {args.root} {args.queue}"
         )
     else:
         print("\nNo changes needed.")
@@ -889,19 +889,74 @@ def run_scan(args):
 
 FINGERPRINT_TITLE_THRESHOLD = 0.5   # deliberately low -- just a sanity check
 
-# Strips one trailing parenthesized/bracketed qualifier, e.g.
-# "Reckoner (Live)" -> "Reckoner". Applied repeatedly, so it also
-# catches "Song (Live) [Remaster]".
-TITLE_VARIATION_RE = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*$")
+# Title variations stripped before comparing, so e.g. "Reckoner (Live)"
+# or "Umbrella feat. Jay-Z - Radio Edit" compare equal to "Reckoner"/
+# "Umbrella". Each stripper is skipped if it would empty the title.
+BRACKETED_ASIDE_RE = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*$")
+FEATURE_CREDIT_RE = re.compile(
+    r"\s*[-–—]?\s*\b(?:feat\.?|ft\.?|featuring)\s+.+$",
+    re.IGNORECASE,
+)
+# A trailing " - <words>" clause is a version tag if any of its words
+# is one of these -- broader than an exact-phrase list, so it also
+# catches "Remastered 2011", "Acoustic Version", "Mono Mix", etc.
+VERSION_TAG_WORDS = {
+    "live", "acoustic", "remaster", "remastered", "edit", "mix", "remix",
+    "version", "mono", "stereo", "demo", "instrumental", "explicit",
+    "clean", "deluxe", "bonus", "single", "album", "radio", "extended",
+    "original", "session", "alternate", "reprise", "outtake", "take",
+    "unplugged", "rehearsal",
+}
+VERSION_TAG_RE = re.compile(r"\s+[-–—]\s+([^-–—]+)$")
+
+
+def strip_bracketed_aside(text):
+    """'Song (Live)' -> 'Song': drop a trailing (...)/[...] group."""
+    return BRACKETED_ASIDE_RE.sub("", text).strip()
+
+
+def strip_feature_credit(text):
+    """'Song feat. X' -> 'Song': drop a bare feat./ft./featuring
+    credit (one already inside brackets is caught by the stripper
+    above)."""
+    return FEATURE_CREDIT_RE.sub("", text).strip()
+
+
+def strip_version_tag(text):
+    """'Song - Remastered 2011' -> 'Song': drop a trailing ' - ...'
+    clause if it looks like a version/edit tag."""
+    match = VERSION_TAG_RE.search(text)
+    if not match:
+        return text
+    words = set(re.findall(r"[a-z]+", match.group(1).lower()))
+    if not words & VERSION_TAG_WORDS:
+        return text
+    return text[:match.start()].strip()
+
+
+# Bracket stripping goes first and, on any change, every stripper is
+# retried from the top -- so a "feat." or version tag nested inside a
+# not-yet-removed bracket (e.g. "Song (feat. X) (Live)") is never
+# reached directly; the bracket around it is always drained first.
+TITLE_STRIPPERS = (
+    strip_bracketed_aside, strip_version_tag, strip_feature_credit,
+)
 
 
 def strip_title_variations(title):
+    """Repeatedly apply TITLE_STRIPPERS, restarting from the top after
+    every change, until none of them apply. Never strips a title down
+    to nothing."""
     text = title.strip()
-    while True:
-        stripped = TITLE_VARIATION_RE.sub("", text).strip()
-        if stripped == text:
-            return text
-        text = stripped
+    changed = True
+    while changed:
+        changed = False
+        for strip in TITLE_STRIPPERS:
+            candidate = strip(text)
+            if candidate and candidate != text:
+                text, changed = candidate, True
+                break
+    return text
 
 
 def acoustid_recording_titles(path, api_key):
@@ -1278,7 +1333,7 @@ QUEUE_HEADER = """\
 # Music metadata changes queue.
 #
 # Review and edit the fields below as needed, then apply with:
-#   {script} apply {root} --queue {queue}
+#   {script} apply {root} {queue}
 #
 # Delete a field to skip just that change, or remove a whole file's entry
 # to skip that file entirely. File paths (relative to root) are the keys.
@@ -1754,9 +1809,20 @@ def add_root_arg(subparser, help_text=ROOT_HELP):
     subparser.add_argument("root", help=help_text)
 
 
-def add_queue_arg(subparser, help_text):
+def add_queue_option(subparser, help_text):
+    """A --queue flag, for scan (which writes a queue rather than
+    reading one, so it doesn't take the positional below)."""
     subparser.add_argument(
         "--queue", default=DEFAULT_QUEUE_FILE,
+        help=f"{help_text} (default: %(default)s)",
+    )
+
+
+def add_queue_positional(subparser, help_text):
+    """An optional positional queue file, for every step that reads
+    one: check, fingerprint, apply."""
+    subparser.add_argument(
+        "queue", nargs="?", default=DEFAULT_QUEUE_FILE,
         help=f"{help_text} (default: %(default)s)",
     )
 
@@ -1778,7 +1844,7 @@ def add_scan_args(subparsers):
         "scan", help="Search MusicBrainz and queue metadata/art changes.",
     )
     add_root_arg(scan_p)
-    add_queue_arg(scan_p, "Where to write queued changes")
+    add_queue_option(scan_p, "Where to write queued changes")
     scan_p.add_argument(
         "--no-art", action="store_true",
         help="Don't download fresh album art during this scan.",
@@ -1809,10 +1875,7 @@ def add_check_args(subparsers):
     check_p = subparsers.add_parser(
         "check", help="Sanity-check a queued changes file.",
     )
-    check_p.add_argument(
-        "queue", nargs="?", default=DEFAULT_QUEUE_FILE,
-        help="Queue file to check (default: %(default)s)",
-    )
+    add_queue_positional(check_p, "Queue file to check")
 
 
 def add_fingerprint_args(subparsers):
@@ -1821,7 +1884,7 @@ def add_fingerprint_args(subparsers):
         help="AcoustID sanity-check queued titles against the real audio.",
     )
     add_root_arg(fingerprint_p, SCANNED_ROOT_HELP)
-    add_queue_arg(fingerprint_p, "Queue file to check")
+    add_queue_positional(fingerprint_p, "Queue file to check")
     fingerprint_p.add_argument(
         "--acoustid-api-key", default=os.environ.get("MMF_ACOUSTID_API_KEY"),
         help="AcoustID API key (default: $MMF_ACOUSTID_API_KEY). "
@@ -1834,7 +1897,7 @@ def add_apply_args(subparsers):
         "apply", help="Apply a queued changes file and its queued album art.",
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
-    add_queue_arg(apply_p, "Queue file to apply")
+    add_queue_positional(apply_p, "Queue file to apply")
     apply_p.add_argument(
         "--art-dir", default=DEFAULT_ART_DIR,
         help="Where queued album art was saved (default: %(default)s)",
