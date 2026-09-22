@@ -2,14 +2,13 @@
 network call faked out."""
 
 import io
-import subprocess
 from argparse import Namespace
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
 
-from conftest import needs_ffmpeg, write_queue
+from conftest import make_audio, needs_ffmpeg, write_queue
 
 RELEASE = {"release": {"medium-list": [{"track-list": [
     {"position": "1", "recording": {
@@ -91,19 +90,6 @@ def jpeg_bytes():
     return buffer.getvalue()
 
 
-def make_mp3(path, title):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
-            "-i", "sine=duration=0.2", "-metadata", f"title={title}",
-            str(path),
-        ],
-        check=True,
-    )
-    return path
-
-
 # ---------------------------------------------------------------------------
 # MusicBrainz
 # ---------------------------------------------------------------------------
@@ -145,7 +131,8 @@ def test_scan_queues_musicbrainz_changes_and_art(mmf, fake_mb, monkeypatch,
                                                  tmp_path):
     monkeypatch.setattr(mmf, "fetch_cover_art", lambda _id: jpeg_bytes())
     root = tmp_path / "root"
-    make_mp3(root / "Artist A" / "Album" / "02 - second.mp3", "old")
+    make_audio(root / "Artist A" / "Album" / "02 - second.mp3",
+               "-metadata", "title=old")
     queue = tmp_path / "q.yml"
     art_dir = tmp_path / "art"
     mmf.run_scan(Namespace(

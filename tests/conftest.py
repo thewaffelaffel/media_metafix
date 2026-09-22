@@ -65,6 +65,19 @@ def make_video(path, *metadata):
     return path
 
 
+def make_audio(path, *metadata):
+    """A short sine-wave audio file at `path`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+            "-i", "sine=duration=0.2", *metadata, str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
 def write_queue(path, text):
     path.write_text(f"# root: /nowhere\n{text}", encoding="utf-8")
     return path

@@ -1,5 +1,7 @@
 from argparse import Namespace
 
+import pytest
+
 from conftest import write_queue
 
 
@@ -38,3 +40,26 @@ def test_check_track_warnings(mmf, tmp_path, answer, capsys):
     assert "same title 'One'" in out
     assert "disagree on album" in out
     assert "doesn't match the first entry in artists" in out
+
+
+@pytest.mark.parametrize("step", [
+    "scan", "check", "fingerprint", "apply", "normalize", "convert",
+    "rename",
+])
+def test_cli_help(mmf, step, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        mmf.build_arg_parser().parse_args([step, "-h"])
+    assert exit_info.value.code == 0
+    assert step in capsys.readouterr().out
+
+
+def test_cli_dispatch(mmf, monkeypatch):
+    calls = []
+    monkeypatch.setitem(mmf.STEP_HANDLERS, "rename", calls.append)
+    monkeypatch.setattr("sys.argv", [
+        "music_metafix", "rename", "/music", "%num", "--no-backup",
+    ])
+    mmf.main()
+    assert calls[0].root == "/music"
+    assert calls[0].template == "%num"
+    assert calls[0].no_backup

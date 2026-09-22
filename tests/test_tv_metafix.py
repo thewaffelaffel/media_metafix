@@ -184,3 +184,112 @@ def test_embed_subtitle_and_rename(tmf, tmp_path):
     tmf.rename_file(avi, "%title (x)")
     assert (tmp_path / "Show" / "Season 1" / "S01E01 Pilot.mkv").exists()
     assert (tmp_path / "Movie" / "M (x).en.srt").exists()
+
+
+@needs_ffmpeg
+def test_convert_keeps_streams_and_tags(tmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    path = make_video(root / "Heat" / "Heat.mkv")
+    tmf.write_tags(path, {"series": "Heat", "title": "Heat", "year": 1995})
+    tmf.save_subtitle(path, b"1\n00:00:00,000 --> 00:00:00,500\nHi\n", "en")
+    tmf.run_convert(Namespace(
+        root=str(root), from_ext="mkv", to_ext="mp4", no_backup=True,
+    ))
+    assert "1 file(s) converted, 0 error(s)" in capsys.readouterr().out
+    mp4 = path.with_suffix(".mp4")
+    assert not path.exists()
+    assert tmf.read_tags(mp4) == {
+        "show": None, "season": None, "episode": None, "title": "Heat",
+        "series": "Heat", "year": 1995,
+    }
+    assert tmf.has_subtitles(mp4, "en")
+
+
+@needs_ffmpeg
+def test_convert_failure_keeps_original(tmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    path = make_video(root / "Heat" / "Heat.mkv")
+    tmf.run_convert(Namespace(
+        root=str(root), from_ext="mkv", to_ext="webm", no_backup=True,
+    ))
+    out, err = capsys.readouterr()
+    assert "Failed to convert" in err
+    assert "0 file(s) converted, 1 error(s)" in out
+    assert path.exists()
+    assert list(path.parent.iterdir()) == [path]
+
+
+@needs_ffmpeg
+def test_run_rename(tmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    episode = make_video(root / "Show" / "Season 1" / "e.mkv")
+    movie = make_video(root / "Heat" / "m.mkv")
+    tmf.write_tags(episode, {"show": "Show", "season": 1, "episode": 2,
+                             "title": "Two"})
+    tmf.write_tags(movie, {"series": "Heat", "title": "Heat", "year": 1995})
+    args = Namespace(root=str(root), episodes=None, movies=None,
+                     no_backup=True)
+    tmf.run_rename(args)
+    assert "nothing to do" in capsys.readouterr().err
+    args.episodes = "%show S%seasonE%episode %title"
+    tmf.run_rename(args)
+    assert (root / "Show" / "Season 1" / "Show S01E02 Two.mkv").exists()
+    assert movie.exists()
+    args.movies = "%title (%year)"
+    tmf.run_rename(args)
+    assert (root / "Heat" / "Heat (1995).mkv").exists()
+
+
+@needs_ffmpeg
+def test_write_tags_warns_about_unsupported_fields(tmf, tmp_path, capsys):
+    path = make_video(tmp_path / "Show" / "Season 1" / "e.avi")
+    tmf.write_tags(path, {"show": "Show", "season": 1, "episode": 2,
+                          "title": "Two"})
+    assert ".avi can't store show, season, episode" in \
+        capsys.readouterr().err
+    assert tmf.read_tags(path)["title"] == "Two"
+
+
+@needs_ffmpeg
+def test_scan_without_tvmaze_uses_filename(tmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    make_video(root / "Show" / "Season 3" / "S03E07 - Seven.mkv")
+    queue = tmp_path / "q.yml"
+    tmf.run_scan(Namespace(root=str(root), queue=str(queue),
+                           tmdb_api_key=None, no_tvmaze=True))
+    assert "No TVmaze match found" in capsys.readouterr().err
+    assert tmf.load_queue(queue) == {"Show/Season 3/S03E07 - Seven.mkv": {
+        "show": "Show", "season": 3, "episode": 7, "title": None,
+    }}
+
+
+def test_iter_videos_of_ext(tmf, tmp_path):
+    for name in ("a.MKV", "b.mp4"):
+        (tmp_path / "Heat").mkdir(exist_ok=True)
+        (tmp_path / "Heat" / name).touch()
+    assert [p.name for p in tmf.iter_videos_of_ext(tmp_path, ".mkv")] == \
+        ["a.MKV"]
+
+
+@pytest.mark.parametrize("step", [
+    "scan", "check", "fingerprint", "apply", "caption", "convert",
+    "rename",
+])
+def test_cli_help(tmf, step, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        tmf.build_arg_parser().parse_args([step, "-h"])
+    assert exit_info.value.code == 0
+    assert step in capsys.readouterr().out
+
+
+def test_cli_dispatch(tmf, monkeypatch):
+    calls = []
+    monkeypatch.setitem(tmf.STEP_HANDLERS, "caption", calls.append)
+    monkeypatch.setenv("TMF_OPENSUBTITLES_API_KEY", "from-env")
+    monkeypatch.setattr("sys.argv", [
+        "tv_metafix", "caption", "/videos", "--lang", "fr",
+    ])
+    tmf.main()
+    assert (calls[0].root, calls[0].lang) == ("/videos", "fr")
+    assert calls[0].opensubtitles_api_key == "from-env"
+    assert not calls[0].no_backup
