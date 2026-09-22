@@ -38,10 +38,16 @@ def titles_match(a, b):
     return fuzzy_ratio(a, b) >= FUZZY_SAME_ENOUGH
 
 
+def only_case_differs(a, b):
+    a, b = (a or "").strip(), (b or "").strip()
+    return a != b and a.casefold() == b.casefold()
+
+
 def should_replace(new, current):
-    """True if `new` differs enough from `current` to queue. Strict,
-    so tags still get punctuation fixes."""
-    return fuzzy_ratio(new, current, strict=True) < FUZZY_SAME_ENOUGH
+    """True if `new` differs enough from `current` to queue. Case and
+    punctuation fixes always count."""
+    return only_case_differs(new, current) or \
+        fuzzy_ratio(new, current, strict=True) < FUZZY_SAME_ENOUGH
 
 
 def best_fuzzy_match(candidates, target):

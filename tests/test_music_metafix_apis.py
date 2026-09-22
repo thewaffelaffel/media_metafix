@@ -135,7 +135,7 @@ def test_apply_track_match(mmf):
     updates = {}
     match = {"title": "Second Song", "artists": ["Artist A", "Guest"]}
     mmf.apply_track_match(
-        updates, {"title": "old", "tracknumber": "1"}, 2, match,
+        updates, {"title": "second song", "tracknumber": "1"}, 2, match,
     )
     assert updates == {"title": "Second Song", "tracknumber": "2",
                        "artists": ["Artist A", "Guest"]}

@@ -41,9 +41,22 @@ def test_titles_match_rejects_real_differences(filename, title):
     assert not titles_match(filename, title)
 
 
-def test_should_replace_keeps_punctuation_fixes():
-    assert should_replace("What's Up, Doc?", "Whats Up Doc")
-    assert not should_replace("Pilot", "pilot")
+@pytest.mark.parametrize("new, current", [
+    ("What's Up, Doc?", "Whats Up Doc"),   # punctuation
+    ("Second Song", "second song"),        # case
+    ("The Lord of the Rings: The Fellowship of the Ring",
+     "The Lord of the Rings: The Fellowship Of the Ring"),  # 1 letter
+    ("Pilot", None),
+])
+def test_should_replace(new, current):
+    assert should_replace(new, current)
+
+
+@pytest.mark.parametrize("new, current", [
+    ("Pilot", "Pilot"), ("Pilot", "  Pilot "),
+])
+def test_should_not_replace_same_title(new, current):
+    assert not should_replace(new, current)
 
 
 def test_best_fuzzy_match():
