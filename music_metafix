@@ -11,7 +11,7 @@ the folder-trusted "artist" tag is left alone.
 
 Pipeline, each step its own subcommand:
 
-    scan <root>                 Search MusicBrainz; queue metadata changes and
+    scan <root> [queue]         Search MusicBrainz; queue metadata changes and
                                 fresh album art for review.
     check [queue]               Sanity-check a queued changes file, prompting
                                 for how to resolve anything suspicious.
@@ -54,6 +54,7 @@ Setup:
 Usage:
     music_metafix scan /path/to/music/root
     music_metafix scan /path/to/music/root --no-art
+    music_metafix scan /path/to/music/root custom-queue.yml
     music_metafix check
     music_metafix fingerprint /path/to/music/root
     music_metafix apply /path/to/music/root
@@ -62,8 +63,8 @@ Usage:
     music_metafix convert /path/to/music/root wma mp3
     music_metafix rename /path/to/music/root "%num - %title"
 
-Queue file paths are relative to root, so `check`/`fingerprint`/`apply`
-need the same root `scan` was given.
+A queue file's entries are paths relative to the root it was scanned
+from, so `fingerprint`/`apply` need that same root.
 """
 
 import argparse
@@ -1809,18 +1810,8 @@ def add_root_arg(subparser, help_text=ROOT_HELP):
     subparser.add_argument("root", help=help_text)
 
 
-def add_queue_option(subparser, help_text):
-    """A --queue flag, for scan (which writes a queue rather than
-    reading one, so it doesn't take the positional below)."""
-    subparser.add_argument(
-        "--queue", default=DEFAULT_QUEUE_FILE,
-        help=f"{help_text} (default: %(default)s)",
-    )
-
-
-def add_queue_positional(subparser, help_text):
-    """An optional positional queue file, for every step that reads
-    one: check, fingerprint, apply."""
+def add_queue_arg(subparser, help_text):
+    """An optional positional queue file, for every step."""
     subparser.add_argument(
         "queue", nargs="?", default=DEFAULT_QUEUE_FILE,
         help=f"{help_text} (default: %(default)s)",
@@ -1844,7 +1835,7 @@ def add_scan_args(subparsers):
         "scan", help="Search MusicBrainz and queue metadata/art changes.",
     )
     add_root_arg(scan_p)
-    add_queue_option(scan_p, "Where to write queued changes")
+    add_queue_arg(scan_p, "Where to write queued changes")
     scan_p.add_argument(
         "--no-art", action="store_true",
         help="Don't download fresh album art during this scan.",
@@ -1875,7 +1866,7 @@ def add_check_args(subparsers):
     check_p = subparsers.add_parser(
         "check", help="Sanity-check a queued changes file.",
     )
-    add_queue_positional(check_p, "Queue file to check")
+    add_queue_arg(check_p, "Queue file to check")
 
 
 def add_fingerprint_args(subparsers):
@@ -1884,7 +1875,7 @@ def add_fingerprint_args(subparsers):
         help="AcoustID sanity-check queued titles against the real audio.",
     )
     add_root_arg(fingerprint_p, SCANNED_ROOT_HELP)
-    add_queue_positional(fingerprint_p, "Queue file to check")
+    add_queue_arg(fingerprint_p, "Queue file to check")
     fingerprint_p.add_argument(
         "--acoustid-api-key", default=os.environ.get("MMF_ACOUSTID_API_KEY"),
         help="AcoustID API key (default: $MMF_ACOUSTID_API_KEY). "
@@ -1897,7 +1888,7 @@ def add_apply_args(subparsers):
         "apply", help="Apply a queued changes file and its queued album art.",
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
-    add_queue_positional(apply_p, "Queue file to apply")
+    add_queue_arg(apply_p, "Queue file to apply")
     apply_p.add_argument(
         "--art-dir", default=DEFAULT_ART_DIR,
         help="Where queued album art was saved (default: %(default)s)",
