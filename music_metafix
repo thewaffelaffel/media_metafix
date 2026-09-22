@@ -72,36 +72,10 @@ import io
 import os
 import re
 import shutil
-import sys
 from collections import Counter
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from common import check as chk  # noqa: E402
-from common.cli import (  # noqa: E402
-    DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_backup_args, add_queue_arg,
-    add_root_arg, build_parser, run_step,
-)
-from common.ffmpeg import (  # noqa: E402
-    ffmpeg_available, replace_with, run_ffmpeg, temp_output_path,
-)
-from common.files import (  # noqa: E402
-    is_ignored, iter_dirs, iter_files, load_mmfignore, maybe_backup,
-)
-from common.queue import (  # noqa: E402
-    apply_queue, build_queue_fields, load_queue, print_scan_summary,
-    scan_to_queue, verify_queue_root,
-)
-from common.text import (  # noqa: E402
-    best_fuzzy_match, fuzzy_ratio, leading_int,
-    render_filename as render_template, should_replace,
-)
-from common.ui import (  # noqa: E402
-    missing_package, note, warn, warn_missing_file,
-)
 
 try:
     import acoustid
@@ -118,10 +92,33 @@ try:
 except ImportError:
     Image = None
 
-import mutagen  # noqa: E402
-from mutagen.easyid3 import EasyID3  # noqa: E402
-from mutagen.easymp4 import EasyMP4Tags  # noqa: E402
-from mutagen.id3 import TALB, TIT2, TPE1, TRCK, TXXX  # noqa: E402
+import mutagen
+from mutagen.easyid3 import EasyID3
+from mutagen.easymp4 import EasyMP4Tags
+from mutagen.id3 import TALB, TIT2, TPE1, TRCK, TXXX
+
+from common import check as chk
+from common.cli import (
+    DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_backup_args, add_queue_arg,
+    add_root_arg, build_parser, run_step,
+)
+from common.ffmpeg import (
+    ffmpeg_available, replace_with, run_ffmpeg, temp_output_path,
+)
+from common.files import (
+    is_ignored, iter_dirs, iter_files, load_mmfignore, maybe_backup,
+)
+from common.queue import (
+    apply_queue, build_queue_fields, load_queue, print_scan_summary,
+    scan_to_queue, verify_queue_root,
+)
+from common.text import (
+    best_fuzzy_match, fuzzy_ratio, leading_int,
+    render_filename as render_template, should_replace,
+)
+from common.ui import (
+    missing_package, note, warn, warn_missing_file,
+)
 
 # Register "artists" key for mp3/m4a (not required for others)
 EasyID3.RegisterTXXXKey("artists", "ARTISTS")

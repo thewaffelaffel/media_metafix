@@ -51,36 +51,33 @@ import glob
 import os
 import re
 import struct
-import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from common import check as chk  # noqa: E402
-from common.cli import (  # noqa: E402
+from common import check as chk
+from common.cli import (
     SCANNED_ROOT_HELP, add_backup_args, add_queue_arg, add_root_arg,
     build_parser, run_step,
 )
-from common.ffmpeg import (  # noqa: E402
+from common.ffmpeg import (
     ffmpeg_available, ffprobe_json, replace_with, run_ffmpeg,
     temp_output_path,
 )
-from common.files import (  # noqa: E402
+from common.files import (
     iter_dirs, iter_files, iter_kept, load_mmfignore, maybe_backup,
 )
-from common.http import fetch, fetch_json  # noqa: E402
-from common.queue import (  # noqa: E402
+from common.http import fetch, fetch_json
+from common.queue import (
     apply_queue, build_queue_fields, load_queue, print_scan_summary,
     scan_to_queue, verify_queue_root,
 )
-from common.text import (  # noqa: E402
+from common.text import (
     FUZZY_SAME_ENOUGH, best_fuzzy_match, fuzzy_ratio, leading_int,
     render_filename, should_replace,
 )
-from common.ui import note, warn, warn_missing_file  # noqa: E402
+from common.ui import note, warn, warn_missing_file
 
 USER_AGENT = "tv-metafix v0.1"
 
