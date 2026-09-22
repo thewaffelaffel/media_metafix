@@ -583,6 +583,11 @@ SUBTITLE_CODECS = {
 }
 
 
+# Language tags meaning "unknown"; such subtitles count as present.
+UNTAGGED = {None, "", "und"}
+SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt", ".sub")
+
+
 def language_codes(lang):
     return (lang, *LANGUAGE_CODES.get(lang, ()))
 
@@ -598,12 +603,33 @@ def subtitle_streams(path):
     ]
 
 
+def sidecar_subtitles(path):
+    """Subtitle files named after `path`, e.g. "<stem>.srt" or
+    "<stem>.en.srt"."""
+    stem = glob.escape(path.stem)
+    return sorted({
+        sidecar
+        for ext in SUBTITLE_EXTENSIONS
+        for pattern in (f"{stem}{ext}", f"{stem}.*{ext}")
+        for sidecar in path.parent.glob(pattern)
+    })
+
+
+def sidecar_language(sidecar, video):
+    """"en" for "<stem>.en.srt"; "" for "<stem>.srt"."""
+    return sidecar.name[len(video.stem):-len(sidecar.suffix)].lstrip(".")
+
+
 def has_subtitles(path, lang):
-    codes = language_codes(lang)
-    sidecar = path.with_name(f"{path.stem}.{lang}.srt")
-    return sidecar.exists() or any(
-        s.get("tags", {}).get("language") in codes
-        for s in subtitle_streams(path)
+    """True if `path` has `lang` or untagged subtitles, embedded or
+    alongside. Untagged ones count, so nothing gets doubled up."""
+    accepted = {*language_codes(lang), *UNTAGGED}
+    return any(
+        sidecar_language(sidecar, path) in accepted
+        for sidecar in sidecar_subtitles(path)
+    ) or any(
+        stream.get("tags", {}).get("language") in accepted
+        for stream in subtitle_streams(path)
     )
 
 
@@ -815,11 +841,6 @@ def template_values(path, tags):
         "%series": tags.get("series") or "",
         "%year": tags.get("year") or "",
     }
-
-
-def sidecar_subtitles(path):
-    """"<stem>.<lang>.srt" files saved next to `path` by `caption`."""
-    return path.parent.glob(f"{glob.escape(path.stem)}.*.srt")
 
 
 def rename_file(path, template, dry_run=False):

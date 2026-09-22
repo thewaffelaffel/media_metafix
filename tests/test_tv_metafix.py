@@ -323,3 +323,41 @@ def test_dry_runs_change_nothing(tmf, tmp_path, capsys):
     assert movie.read_bytes() == before
     assert sorted(p.name for p in movie.parent.iterdir()) == \
         ["m.en.srt", "m.mkv"]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("sidecar, found", [
+    ("v.srt", True), ("v.en.srt", True), ("v.eng.srt", True),
+    ("v.en.ass", True), ("v.vtt", True), ("v.fr.srt", False),
+    ("other.en.srt", False),
+])
+def test_has_subtitles_sidecars(tmf, tmp_path, sidecar, found):
+    video = make_video(tmp_path / "v.mkv")
+    (tmp_path / sidecar).write_text("subs")
+    assert tmf.has_subtitles(video, "en") == found
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ext, language, found", [
+    (".mkv", "eng", True), (".mkv", None, True), (".mp4", None, True),
+    (".mkv", "fre", False),
+])
+def test_has_subtitles_embedded(tmf, tmp_path, ext, language, found):
+    srt = tmp_path / "s.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:00,500\nHi\n")
+    video = tmp_path / f"v{ext}"
+    codec = "srt" if ext == ".mkv" else "mov_text"
+    tags = ["-metadata:s:s:0", f"language={language}"] if language else []
+    make_video(video, "-i", str(srt), "-map", "0", "-map", "1",
+               "-c:s", codec, *tags)
+    assert tmf.has_subtitles(video, "en") == found
+
+
+@needs_ffmpeg
+def test_rename_moves_all_sidecars(tmf, tmp_path):
+    video = make_video(tmp_path / "Heat" / "m.mkv", "-metadata", "title=Heat")
+    for name in ("m.srt", "m.en.ass"):
+        (video.parent / name).write_text("subs")
+    tmf.rename_file(video, "%title")
+    assert sorted(p.name for p in video.parent.iterdir()) == \
+        ["Heat.en.ass", "Heat.mkv", "Heat.srt"]

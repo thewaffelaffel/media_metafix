@@ -76,7 +76,10 @@ Other steps (run any step with `-h` for its options):
 - **Album art** is only downloaded for albums without an `art.jpg`,
   and `apply` never replaces an existing one.
 - **Subtitles** (`scan --lang en` by default, `--no-captions` to skip)
-  are only downloaded for videos without subtitles in that language.
+  are only downloaded for videos without subtitles in that language,
+  embedded or in a file alongside (`.srt`, `.ass`, `.ssa`, `.vtt`,
+  `.sub`). Subtitles with no language tag count too, to avoid
+  duplicates.
   Downloads count against OpenSubtitles' daily limit, and a rescan
   reuses files already in `tmp/captions/`. `apply` embeds them in MKV,
   MP4, M4V, MOV and WebM; other containers, like AVI, get a
