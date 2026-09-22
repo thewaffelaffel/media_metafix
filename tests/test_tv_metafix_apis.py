@@ -135,7 +135,7 @@ def test_scan_uses_tmdb(tmf, fake_api, tmp_path):
     queue = tmp_path / "q.yml"
     tmf.run_scan(Namespace(
         root=str(root), queue=str(queue), tmdb_api_key="key",
-        no_tvmaze=True, no_subtitles=True,
+        no_tvmaze=True, no_subs=True,
     ))
     assert tmf.load_queue(queue) == {
         "Harry Potter/Sorcerers Stone (2001).mkv": {
@@ -257,8 +257,8 @@ def test_find_subtitle_prefers_hash_match(tmf, fake_api, monkeypatch):
 def scan_args(root, tmp_path, lang="en"):
     return Namespace(
         root=str(root), queue=str(tmp_path / "q.yml"), tmdb_api_key=None,
-        no_tvmaze=True, no_subtitles=False, sub_lang=lang,
-        subtitles_dir=str(tmp_path / "subtitles"),
+        no_tvmaze=True, no_subs=False, sub_lang=lang,
+        subs_dir=str(tmp_path / "subtitles"),
         opensubtitles_api_key="key", opensubtitles_username=None,
     )
 
@@ -266,7 +266,7 @@ def scan_args(root, tmp_path, lang="en"):
 def apply_args(root, tmp_path, dry_run=False):
     return Namespace(
         root=str(root), queue=str(tmp_path / "q.yml"), dry_run=dry_run,
-        subtitles_dir=str(tmp_path / "subtitles"),
+        subs_dir=str(tmp_path / "subtitles"),
     )
 
 

@@ -153,7 +153,7 @@ def test_scan_queues_musicbrainz_changes_and_art(mmf, fake_mb, monkeypatch,
     art_dir = tmp_path / "art"
     mmf.run_scan(Namespace(
         root=str(root), queue=str(queue), no_art=False,
-        art_dir=str(art_dir), art_filename="art.jpg",
+        art_dir=str(art_dir), art_fn="art.jpg",
         musicbrainz_contact="me@example.com", no_musicbrainz=False,
     ))
     assert mmf.load_queue(queue) == {"Artist A/Album/02 - second.mp3": {
@@ -325,7 +325,7 @@ def test_scan_with_custom_art_filename(mmf, fake_mb, monkeypatch,
     art_dir = tmp_path / "art"
     mmf.run_scan(Namespace(
         root=str(root), queue=str(tmp_path / "q.yml"), no_art=False,
-        art_dir=str(art_dir), art_filename="cover.png",
+        art_dir=str(art_dir), art_fn="cover.png",
         musicbrainz_contact="me@example.com", no_musicbrainz=True,
     ))
     assert sorted(p.relative_to(art_dir).as_posix()

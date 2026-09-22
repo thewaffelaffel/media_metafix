@@ -495,7 +495,7 @@ def run_scan(args):
         "Music",
     )
     if not args.no_art:
-        queue_album_art(root, args.art_dir, args.art_filename,
+        queue_album_art(root, args.art_dir, args.art_fn,
                         args.musicbrainz_contact)
     print_scan_summary(counts, args)
 
@@ -893,7 +893,7 @@ def add_album_art_args(scan_p):
     add_dir_arg(scan_p, "--art-dir", DEFAULT_ART_DIR,
                 "Where to save downloaded album art")
     scan_p.add_argument(
-        "--art-filename", default=ALBUM_ART_FILENAME, type=art_filename,
+        "--art-fn", default=ALBUM_ART_FILENAME, type=art_filename,
         help="Album art filename; its extension sets the image format, "
              "and albums that already have it are skipped "
              "(default: %(default)s)",

@@ -401,13 +401,13 @@ def compute_scan_change(root, path, args, cache):
 
 def run_scan(args):
     """Queue changes for every video, and download subtitles unless
-    --no-subtitles."""
+    --no-subs."""
     if not require_ffmpeg("read tags"):
         return
     if not args.tmdb_api_key:
         note("no TMDB API key -- movie titles come from filenames.")
     # Checked first, so a bad --sub-lang fails before the slow part.
-    subtitles = None if args.no_subtitles else subtitle_setup(args)
+    subtitles = None if args.no_subs else subtitle_setup(args)
     root = Path(args.root)
     cache = {}
     counts = scan_to_queue(
@@ -416,7 +416,7 @@ def run_scan(args):
         "Video",
     )
     if subtitles:
-        queue_subtitles(root, *subtitles, args.subtitles_dir)
+        queue_subtitles(root, *subtitles, args.subs_dir)
     print_scan_summary(counts, args)
 
 
@@ -858,7 +858,7 @@ def run_apply(args):
     root = Path(args.root)
     verify_queue_root(args.queue, root)
     apply_queue(root, args.queue, write_tags, args.dry_run)
-    added = apply_subtitles(root, args.subtitles_dir, args.dry_run)
+    added = apply_subtitles(root, args.subs_dir, args.dry_run)
     if added:
         print(f"{added} video(s) {outcome('subtitle', args.dry_run)}.")
 
@@ -1056,7 +1056,7 @@ def add_opensubtitles_args(subparser, login=False):
 
 def add_subtitle_args(scan_p):
     scan_p.add_argument(
-        "--no-subtitles", action="store_true",
+        "--no-subs", action="store_true",
         help="Don't download subtitles.",
     )
     scan_p.add_argument(
@@ -1064,7 +1064,7 @@ def add_subtitle_args(scan_p):
         help="Subtitle language as OpenSubtitles codes it, e.g. fr or "
              "pt-BR (default: %(default)s)",
     )
-    add_dir_arg(scan_p, "--subtitles-dir", DEFAULT_SUBTITLES_DIR,
+    add_dir_arg(scan_p, "--subs-dir", DEFAULT_SUBTITLES_DIR,
                 "Where to save downloaded subtitles")
     add_opensubtitles_args(scan_p, login=True)
 
@@ -1102,7 +1102,7 @@ def add_apply_args(subparsers):
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
-    add_dir_arg(apply_p, "--subtitles-dir", DEFAULT_SUBTITLES_DIR,
+    add_dir_arg(apply_p, "--subs-dir", DEFAULT_SUBTITLES_DIR,
                 "Where scan saved subtitles")
     add_dry_run_arg(apply_p)
 
