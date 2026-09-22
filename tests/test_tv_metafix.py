@@ -149,8 +149,8 @@ def test_scan_and_apply(tmf, tmp_path, monkeypatch):
     queue = tmp_path / "changes.yml"
     args = Namespace(
         root=str(root), queue=str(queue), tmdb_api_key=None,
-        no_tvmaze=False, no_captions=True, dry_run=False,
-        captions_dir=str(tmp_path / "captions"),
+        no_tvmaze=False, no_subtitles=True, dry_run=False,
+        subtitles_dir=str(tmp_path / "subtitles"),
     )
     tmf.run_scan(args)
     entries = tmf.load_queue(queue)
@@ -259,7 +259,7 @@ def test_scan_without_tvmaze_uses_filename(tmf, tmp_path, capsys):
     queue = tmp_path / "q.yml"
     tmf.run_scan(Namespace(root=str(root), queue=str(queue),
                            tmdb_api_key=None, no_tvmaze=True,
-                           no_captions=True))
+                           no_subtitles=True))
     assert "No TVmaze match found" in capsys.readouterr().err
     assert tmf.load_queue(queue) == {"Show/Season 3/S03E07 - Seven.mkv": {
         "show": "Show", "season": 3, "episode": 7, "title": None,
@@ -294,8 +294,8 @@ def test_cli_dispatch(tmf, monkeypatch):
     tmf.main()
     assert (calls[0].root, calls[0].sub_lang) == ("/videos", "pt-BR")
     assert calls[0].opensubtitles_api_key == "from-env"
-    assert not calls[0].no_captions
-    assert calls[0].captions_dir == "tmp/captions"
+    assert not calls[0].no_subtitles
+    assert calls[0].subtitles_dir == "tmp/subtitles"
 
 
 @needs_ffmpeg
@@ -310,7 +310,7 @@ def test_dry_runs_change_nothing(tmf, tmp_path, capsys):
                      "Heat/m.mkv: {series: Heat, title: Heat, year: 1995}\n")
 
     tmf.run_apply(Namespace(root=str(root), queue=str(queue), dry_run=True,
-                            captions_dir=str(tmp_path / "captions")))
+                            subtitles_dir=str(tmp_path / "subtitles")))
     tmf.run_convert(Namespace(root=str(root), from_ext="mkv", to_ext="mp4",
                               dry_run=True))
     tmf.run_rename(Namespace(root=str(root), episodes=None,

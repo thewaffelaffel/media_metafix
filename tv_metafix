@@ -11,7 +11,7 @@ numbers come from TVmaze; movie titles and years from TMDB, falling
 back to the filename. Missing subtitles come from OpenSubtitles.
 
 scan only queues changes: metadata to tmp/changes.yml and subtitles to
-tmp/captions (tmp is relative to the current directory, not root).
+tmp/subtitles (tmp is relative to the current directory, not root).
 Steps that modify files take --dry-run to print what they'd change
 instead. A ".mmfignore" file in root (".gitignore" syntax) excludes
 matches from every step.
@@ -76,7 +76,7 @@ TAG_KEYS = {
 }
 ALBUM_TAG_KEYS = dict(TAG_KEYS, series="album")
 
-DEFAULT_CAPTIONS_DIR = str(Path(DEFAULT_TMP_DIR) / "captions")
+DEFAULT_SUBTITLES_DIR = str(Path(DEFAULT_TMP_DIR) / "subtitles")
 
 
 # ---------------------------------------------------------------------------
@@ -401,13 +401,13 @@ def compute_scan_change(root, path, args, cache):
 
 def run_scan(args):
     """Queue changes for every video, and download subtitles unless
-    --no-captions."""
+    --no-subtitles."""
     if not require_ffmpeg("read tags"):
         return
     if not args.tmdb_api_key:
         note("no TMDB API key -- movie titles come from filenames.")
     # Checked first, so a bad --sub-lang fails before the slow part.
-    captions = None if args.no_captions else caption_setup(args)
+    subtitles = None if args.no_subtitles else subtitle_setup(args)
     root = Path(args.root)
     cache = {}
     counts = scan_to_queue(
@@ -415,8 +415,8 @@ def run_scan(args):
         lambda path: compute_scan_change(root, path, args, cache),
         "Video",
     )
-    if captions:
-        queue_captions(root, *captions, args.captions_dir)
+    if subtitles:
+        queue_subtitles(root, *subtitles, args.subtitles_dir)
     print_scan_summary(counts, args)
 
 
@@ -571,7 +571,7 @@ def run_fingerprint(args):
 
 
 # ---------------------------------------------------------------------------
-# Subtitles: `scan` downloads them to tmp/captions, mirroring root;
+# Subtitles: `scan` downloads them to tmp/subtitles, mirroring root;
 # `apply` embeds them.
 # ---------------------------------------------------------------------------
 
@@ -748,13 +748,13 @@ def save_subtitle(path, data, lang):
     return path
 
 
-def caption_file(captions_dir, root, video, lang):
+def subtitle_file(subtitles_dir, root, video, lang):
     """Where `scan` saves `video`'s subtitles."""
     rel_dir = video.parent.relative_to(root)
-    return Path(captions_dir) / rel_dir / f"{video.stem}.{lang}.srt"
+    return Path(subtitles_dir) / rel_dir / f"{video.stem}.{lang}.srt"
 
 
-def download_caption(client, root, video, dest, lang):
+def download_subtitle(client, root, video, dest, lang):
     """Save `video`'s best `lang` subtitles to `dest`. Returns
     "downloaded", "present", "missing" or "error"."""
     try:
@@ -790,7 +790,7 @@ def verified_language(client, lang):
     return known[lang.lower()]
 
 
-def caption_setup(args):
+def subtitle_setup(args):
     """(client, language) for downloading subtitles, or None if
     there's no API key. Exits on an unsupported --sub-lang."""
     client = opensubtitles_client(args)
@@ -799,12 +799,12 @@ def caption_setup(args):
     return client, verified_language(client, args.sub_lang)
 
 
-def queue_captions(root, client, lang, captions_dir):
+def queue_subtitles(root, client, lang, subtitles_dir):
     """Download `lang` subtitles for every video lacking them."""
     counts = Counter(
-        download_caption(
+        download_subtitle(
             client, root, video,
-            caption_file(captions_dir, root, video, lang), lang,
+            subtitle_file(subtitles_dir, root, video, lang), lang,
         )
         for video in iter_videos(root)
     )
@@ -815,7 +815,7 @@ def queue_captions(root, client, lang, captions_dir):
     )
 
 
-def caption_target(srt, dest_dir):
+def subtitle_target(srt, dest_dir):
     """(video, lang) for a queued "<stem>.<lang>.srt", or None."""
     stem, _, lang = srt.name[:-len(".srt")].rpartition(".")
     for video in filter(is_video, iter_files(dest_dir)):
@@ -824,30 +824,30 @@ def caption_target(srt, dest_dir):
     return None
 
 
-def apply_caption(srt, video, lang, dry_run):
+def apply_subtitle(srt, video, lang, dry_run):
     """Embed `srt` in `video` unless it already has `lang` subtitles.
     Returns True if it did (or would)."""
     if has_subtitles(video, lang):
         print(f"Keeping existing {lang} subtitles: {video}")
         return False
     dest = video if dry_run else save_subtitle(video, srt.read_bytes(), lang)
-    report("caption", dest, dry_run)
+    report("subtitle", dest, dry_run)
     return True
 
 
-def apply_captions(root, captions_dir, dry_run):
+def apply_subtitles(root, subtitles_dir, dry_run):
     """Embed every queued subtitle file. Returns how many were."""
-    captioned = 0
-    for srt, dest_dir in iter_queued_files(captions_dir, root):
-        target = caption_target(srt, dest_dir)
+    added = 0
+    for srt, dest_dir in iter_queued_files(subtitles_dir, root):
+        target = subtitle_target(srt, dest_dir)
         if target is None:
             warn(f"No video for queued subtitles: {srt}")
             continue
         try:
-            captioned += apply_caption(srt, *target, dry_run)
+            added += apply_subtitle(srt, *target, dry_run)
         except (OSError, RuntimeError) as exc:
-            warn(f"Failed to caption {target[0]}: {exc}")
-    return captioned
+            warn(f"Failed to add subtitles to {target[0]}: {exc}")
+    return added
 
 
 # ---------------------------------------------------------------------------
@@ -858,9 +858,9 @@ def run_apply(args):
     root = Path(args.root)
     verify_queue_root(args.queue, root)
     apply_queue(root, args.queue, write_tags, args.dry_run)
-    captioned = apply_captions(root, args.captions_dir, args.dry_run)
-    if captioned:
-        print(f"{captioned} video(s) {outcome('caption', args.dry_run)}.")
+    added = apply_subtitles(root, args.subtitles_dir, args.dry_run)
+    if added:
+        print(f"{added} video(s) {outcome('subtitle', args.dry_run)}.")
 
 
 # ---------------------------------------------------------------------------
@@ -1054,9 +1054,9 @@ def add_opensubtitles_args(subparser, login=False):
     )
 
 
-def add_caption_args(scan_p):
+def add_subtitle_args(scan_p):
     scan_p.add_argument(
-        "--no-captions", action="store_true",
+        "--no-subtitles", action="store_true",
         help="Don't download subtitles.",
     )
     scan_p.add_argument(
@@ -1064,7 +1064,7 @@ def add_caption_args(scan_p):
         help="Subtitle language as OpenSubtitles codes it, e.g. fr or "
              "pt-BR (default: %(default)s)",
     )
-    add_dir_arg(scan_p, "--captions-dir", DEFAULT_CAPTIONS_DIR,
+    add_dir_arg(scan_p, "--subtitles-dir", DEFAULT_SUBTITLES_DIR,
                 "Where to save downloaded subtitles")
     add_opensubtitles_args(scan_p, login=True)
 
@@ -1083,7 +1083,7 @@ def add_scan_args(subparsers):
         "--no-tvmaze", action="store_true",
         help="Don't look episodes up on TVmaze.",
     )
-    add_caption_args(scan_p)
+    add_subtitle_args(scan_p)
 
 
 def add_fingerprint_args(subparsers):
@@ -1102,7 +1102,7 @@ def add_apply_args(subparsers):
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
-    add_dir_arg(apply_p, "--captions-dir", DEFAULT_CAPTIONS_DIR,
+    add_dir_arg(apply_p, "--subtitles-dir", DEFAULT_SUBTITLES_DIR,
                 "Where scan saved subtitles")
     add_dry_run_arg(apply_p)
 

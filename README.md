@@ -46,7 +46,7 @@ tv_metafix apply /videos            # write the (edited) queue
 
 `scan` changes nothing in root. It writes a YAML queue for you to
 review, and downloads album art (MMF) or missing subtitles (TMF) into
-`tmp/art/` or `tmp/captions/`, mirroring root's folders. In the queue,
+`tmp/art/` or `tmp/subtitles/`, mirroring root's folders. In the queue,
 delete a field to skip that change, or an entry to skip that file;
 delete a downloaded file to skip it too. `apply` writes the queue,
 then copies in the art or embeds the subtitles. `check` flags things
@@ -79,13 +79,13 @@ Other steps (run any step with `-h` for its options):
   never replaces an existing one.
 - **Subtitles** are English by default; `scan --sub-lang fr` (or any
   OpenSubtitles code, like `pt-BR`) picks another language, and
-  `--no-captions` skips them. `scan` checks the code with OpenSubtitles
+  `--no-subtitles` skips them. `scan` checks the code with OpenSubtitles
   before scanning anything. Subtitles are only downloaded for videos
   without any in that language, embedded or in a file alongside
   (`.srt`, `.ass`, `.ssa`, `.vtt`, `.sub`); subtitles with no language
   tag count too, to avoid duplicates. Downloads count against
   OpenSubtitles' daily limit, and a rescan reuses files already in
-  `tmp/captions/`. `apply` embeds them in MKV, MP4, M4V, MOV and WebM;
+  `tmp/subtitles/`. `apply` embeds them in MKV, MP4, M4V, MOV and WebM;
   other containers, like AVI, get a `name.<lang>.srt` file alongside.
 
 TMF tags are `title`, `show`, `season_number`, `episode_sort`, `date`
