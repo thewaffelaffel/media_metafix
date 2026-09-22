@@ -3,7 +3,7 @@ from argparse import Namespace
 import pytest
 
 from common import check as chk
-from common.files import iter_non_ignored_files, load_mmfignore
+from common.files import is_ignored, load_mmfignore
 from common.queue import (
     build_queue_fields, load_queue, read_root_header, verify_queue_root,
     write_queue_entry,
@@ -72,7 +72,7 @@ def test_render_filename(tmp_path):
     assert render_filename("%title.%ext", path, values) == "AB C.mkv"
 
 
-def test_mmfignore_prunes_directories(tmp_path):
+def test_mmfignore_rules(tmp_path):
     (tmp_path / "keep").mkdir()
     (tmp_path / "skip").mkdir()
     (tmp_path / "keep" / "a.mkv").touch()
@@ -80,8 +80,11 @@ def test_mmfignore_prunes_directories(tmp_path):
     (tmp_path / "skip" / "c.mkv").touch()
     (tmp_path / ".mmfignore").write_text("skip/\n*.tmp\n")
     spec = load_mmfignore(tmp_path)
-    names = {p.name for p in iter_non_ignored_files(tmp_path, spec)}
-    assert names == {"a.mkv", ".mmfignore"}
+    kept = {
+        p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+        if not is_ignored(spec, tmp_path, p)
+    }
+    assert kept == {".mmfignore", "keep", "keep/a.mkv"}
 
 
 def test_build_queue_fields_keeps_zero():

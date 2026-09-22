@@ -267,7 +267,7 @@ def test_caption(tmf, fake_api, tmp_path, capsys):
     )
     args = Namespace(
         root=str(root), lang="en", opensubtitles_api_key="key",
-        opensubtitles_username=None, no_backup=True, tmp_dir=str(tmp_path),
+        opensubtitles_username=None, dry_run=False,
     )
     tmf.run_caption(args)
     assert "2 captioned" in capsys.readouterr().out
@@ -294,8 +294,22 @@ def test_caption_not_found(tmf, fake_api, tmp_path, capsys):
     fake_api(subtitles=lambda params, body: {"data": []})
     tmf.run_caption(Namespace(
         root=str(root), lang="fr", opensubtitles_api_key="key",
-        opensubtitles_username=None, no_backup=True, tmp_dir=str(tmp_path),
+        opensubtitles_username=None, dry_run=False,
     ))
     out, err = capsys.readouterr()
     assert "No fr subtitles found" in err
     assert "1 not found" in out
+
+
+@needs_ffmpeg
+def test_caption_dry_run_skips_download(tmf, fake_api, tmp_path, capsys):
+    root = tmp_path / "root"
+    movie = make_video(root / "Heat" / "Heat.mkv")
+    api = fake_api(subtitles=lambda params, body: {"data": [subtitle(9)]})
+    tmf.run_caption(Namespace(
+        root=str(root), lang="en", opensubtitles_api_key="key",
+        opensubtitles_username=None, dry_run=True,
+    ))
+    assert f"Would caption: {movie}" in capsys.readouterr().out
+    assert api.requests_to("/download") == []
+    assert not tmf.has_subtitles(movie, "en")

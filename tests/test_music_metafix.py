@@ -57,9 +57,9 @@ def test_cli_dispatch(mmf, monkeypatch):
     calls = []
     monkeypatch.setitem(mmf.STEP_HANDLERS, "rename", calls.append)
     monkeypatch.setattr("sys.argv", [
-        "music_metafix", "rename", "/music", "%num", "--no-backup",
+        "music_metafix", "rename", "/music", "%num", "--dry-run",
     ])
     mmf.main()
     assert calls[0].root == "/music"
     assert calls[0].template == "%num"
-    assert calls[0].no_backup
+    assert calls[0].dry_run

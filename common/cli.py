@@ -21,14 +21,10 @@ def add_queue_arg(subparser, help_text):
     )
 
 
-def add_backup_args(subparser):
+def add_dry_run_arg(subparser):
     subparser.add_argument(
-        "--no-backup", action="store_true",
-        help="Skip the backup of root normally taken before this step.",
-    )
-    subparser.add_argument(
-        "--tmp-dir", default=DEFAULT_TMP_DIR,
-        help="Working directory for backups (default: %(default)s)",
+        "--dry-run", action="store_true",
+        help="Print what would change without changing anything.",
     )
 
 
@@ -67,4 +63,4 @@ def add_convert_parser(subparsers, help_text, root_help, example):
     convert_p.add_argument(
         "to_ext", metavar="to", help=f"Target extension, e.g. {example[1]}",
     )
-    add_backup_args(convert_p)
+    add_dry_run_arg(convert_p)

@@ -33,6 +33,27 @@ def missing_package(display_name, pip_name, reason):
     note(f"{display_name} not installed (pip install {pip_name}) -- {reason}")
 
 
+def past_tense(verb):
+    """"convert" -> "converted", "apply" -> "applied"."""
+    if verb.endswith("y"):
+        return verb[:-1] + "ied"
+    return verb + ("d" if verb.endswith("e") else "ed")
+
+
+def outcome(verb, dry_run):
+    """"converted", or "would be converted" in a dry run."""
+    done = past_tense(verb)
+    return f"would be {done}" if dry_run else done
+
+
+def report(verb, detail, dry_run):
+    """Print "Converted: x", or "Would convert: x" in a dry run."""
+    if dry_run:
+        print(f"Would {verb}: {detail}")
+    else:
+        print(f"{past_tense(verb).capitalize()}: {detail}")
+
+
 def prompt_action(message):
     """Show `message` with a CHECK_OPTIONS menu; return the chosen key
     ("skip" on EOF)."""

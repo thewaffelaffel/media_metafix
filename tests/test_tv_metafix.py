@@ -148,7 +148,7 @@ def test_scan_and_apply(tmf, tmp_path, monkeypatch):
     queue = tmp_path / "changes.yml"
     args = Namespace(
         root=str(root), queue=str(queue), tmdb_api_key=None,
-        no_tvmaze=False, no_backup=True, tmp_dir=str(tmp_path),
+        no_tvmaze=False, dry_run=False,
     )
     tmf.run_scan(args)
     entries = tmf.load_queue(queue)
@@ -193,7 +193,7 @@ def test_convert_keeps_streams_and_tags(tmf, tmp_path, capsys):
     tmf.write_tags(path, {"series": "Heat", "title": "Heat", "year": 1995})
     tmf.save_subtitle(path, b"1\n00:00:00,000 --> 00:00:00,500\nHi\n", "en")
     tmf.run_convert(Namespace(
-        root=str(root), from_ext="mkv", to_ext="mp4", no_backup=True,
+        root=str(root), from_ext="mkv", to_ext="mp4", dry_run=False,
     ))
     assert "1 file(s) converted, 0 error(s)" in capsys.readouterr().out
     mp4 = path.with_suffix(".mp4")
@@ -210,7 +210,7 @@ def test_convert_failure_keeps_original(tmf, tmp_path, capsys):
     root = tmp_path / "root"
     path = make_video(root / "Heat" / "Heat.mkv")
     tmf.run_convert(Namespace(
-        root=str(root), from_ext="mkv", to_ext="webm", no_backup=True,
+        root=str(root), from_ext="mkv", to_ext="webm", dry_run=False,
     ))
     out, err = capsys.readouterr()
     assert "Failed to convert" in err
@@ -228,7 +228,7 @@ def test_run_rename(tmf, tmp_path, capsys):
                              "title": "Two"})
     tmf.write_tags(movie, {"series": "Heat", "title": "Heat", "year": 1995})
     args = Namespace(root=str(root), episodes=None, movies=None,
-                     no_backup=True)
+                     dry_run=False)
     tmf.run_rename(args)
     assert "nothing to do" in capsys.readouterr().err
     args.episodes = "%show S%seasonE%episode %title"
@@ -292,4 +292,31 @@ def test_cli_dispatch(tmf, monkeypatch):
     tmf.main()
     assert (calls[0].root, calls[0].lang) == ("/videos", "fr")
     assert calls[0].opensubtitles_api_key == "from-env"
-    assert not calls[0].no_backup
+    assert not calls[0].dry_run
+
+
+@needs_ffmpeg
+def test_dry_runs_change_nothing(tmf, tmp_path, capsys):
+    root = tmp_path / "root"
+    movie = make_video(root / "Heat" / "m.mkv", "-metadata", "title=Heat")
+    sidecar = root / "Heat" / "m.en.srt"
+    sidecar.write_text("subs")
+    before = movie.read_bytes()
+    queue = tmp_path / "q.yml"
+    queue.write_text(f"# root: {root.resolve()}\n"
+                     "Heat/m.mkv: {series: Heat, title: Heat, year: 1995}\n")
+
+    tmf.run_apply(Namespace(root=str(root), queue=str(queue), dry_run=True))
+    tmf.run_convert(Namespace(root=str(root), from_ext="mkv", to_ext="mp4",
+                              dry_run=True))
+    tmf.run_rename(Namespace(root=str(root), episodes=None,
+                             movies="%title", dry_run=True))
+
+    out = capsys.readouterr().out
+    assert f"Would apply: {movie}\n  series: Heat\n" in out
+    assert "Would convert: m.mkv -> m.mp4" in out
+    assert "Would rename: m.en.srt -> Heat.en.srt" in out
+    assert "Would rename: m.mkv -> Heat.mkv" in out
+    assert movie.read_bytes() == before
+    assert sorted(p.name for p in movie.parent.iterdir()) == \
+        ["m.en.srt", "m.mkv"]

@@ -37,10 +37,11 @@ Optional settings, each unlocking the steps listed:
 Both scripts share a scan → check → apply loop:
 
 ```sh
-tv_metafix scan /videos          # look up metadata, write tmp/changes.yml
-tv_metafix check                 # flag suspicious entries interactively
-tv_metafix fingerprint /videos   # optional: compare against the files
-tv_metafix apply /videos         # write the (edited) queue to disk
+tv_metafix scan /videos             # look up metadata, queue changes
+tv_metafix check                    # flag suspicious entries
+tv_metafix fingerprint /videos      # optional: compare with the files
+tv_metafix apply /videos --dry-run  # preview what apply would write
+tv_metafix apply /videos            # write the (edited) queue
 ```
 
 `scan` only writes a YAML queue for you to review. Delete a field to
@@ -79,20 +80,22 @@ episode tags, so `apply` suggests converting those files to MKV.
 
 ## Safety
 
-- `apply`, `normalize`, `caption`, `convert` and `rename` back up root
-  to `tmp/backups/` first unless given `--no-backup`. TMF backups are
-  uncompressed `.tar` files, so budget disk space for large libraries.
+- `apply`, `normalize`, `caption`, `convert` and `rename` take
+  `--dry-run`, which prints each change without making it. Nothing is
+  backed up, so dry-run first and keep your own backups: a real run
+  can't be undone. (`caption --dry-run` still searches OpenSubtitles,
+  but doesn't download anything.)
 - `tmp/` is relative to the current directory, not root. The queue
   records its root, and `apply` refuses to run against another one.
 - A `.mmfignore` file in root (`.gitignore` syntax) excludes files and
-  folders from every step, including backups.
+  folders from every step.
 
 ## Layout
 
 ```
 music_metafix, tv_metafix   the scripts
 common/                     shared code: queue, checks, .mmfignore,
-                            backups, ffmpeg, HTTP, CLI
+                            dry runs, ffmpeg, HTTP, CLI
 tests/                      pytest suite; APIs are faked, network is
                             blocked, ffmpeg tests skip without ffmpeg
 ```

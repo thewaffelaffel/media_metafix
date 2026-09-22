@@ -1,10 +1,8 @@
-"""Walking a library root, .mmfignore rules, and backups."""
+"""Walking a library root, .mmfignore rules, and renaming."""
 
-import tarfile
-from datetime import datetime
 from pathlib import Path
 
-from .ui import missing_package, warn
+from .ui import missing_package, report, warn
 
 try:
     import pathspec
@@ -57,19 +55,6 @@ def iter_kept(spec, root, paths):
     return (p for p in paths if not is_ignored(spec, root, p))
 
 
-def iter_non_ignored_files(root, spec):
-    """Every non-ignored file under `root`, pruning ignored dirs."""
-    root = Path(root)
-    stack = [root]
-    while stack:
-        current = stack.pop()
-        for entry in iter_kept(spec, root, sorted(current.iterdir())):
-            if entry.is_dir():
-                stack.append(entry)
-            else:
-                yield entry
-
-
 def rename_target(path, new_name):
     """`path` with `new_name`, or None (warned) if that's unchanged,
     taken or invalid."""
@@ -87,27 +72,7 @@ def rename_target(path, new_name):
     return new_path
 
 
-def move(path, new_path):
-    path.rename(new_path)
-    print(f"Renamed: {path.name} -> {new_path.name}")
-
-
-def create_backup(root, tmp_dir, compress=True):
-    """Tar every non-ignored file under `root` into tmp_dir/backups."""
-    root = Path(root)
-    spec = load_mmfignore(root)
-    backups_dir = Path(tmp_dir) / "backups"
-    backups_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    suffix, mode = (".tar.gz", "w:gz") if compress else (".tar", "w")
-    backup_path = backups_dir / f"{root.name}-{timestamp}{suffix}"
-    with tarfile.open(backup_path, mode) as tar:
-        for path in iter_non_ignored_files(root, spec):
-            tar.add(path, arcname=str(path.relative_to(root)))
-    print(f"Backup created: {backup_path}")
-    return backup_path
-
-
-def maybe_backup(args, root, compress=True):
-    if not args.no_backup:
-        create_backup(root, args.tmp_dir, compress)
+def move(path, new_path, dry_run=False):
+    if not dry_run:
+        path.rename(new_path)
+    report("rename", f"{path.name} -> {new_path.name}", dry_run)

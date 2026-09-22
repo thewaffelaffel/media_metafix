@@ -9,9 +9,9 @@ its title. A recording's full credit (main + featured artists) goes in
 a separate "artists" tag; "artist" stays as the folder name.
 
 scan only queues changes (tmp/changes.yml by default, relative to the
-current directory, not root). Steps that modify files back root up to
-tmp/backups first unless --no-backup is given. A ".mmfignore" file in
-root (".gitignore" syntax) excludes matches from every step.
+current directory, not root). Steps that modify files take --dry-run
+to print what they'd change instead. A ".mmfignore" file in root
+(".gitignore" syntax) excludes matches from every step.
 
 See README.md for setup and examples.
 """
@@ -47,16 +47,15 @@ from mutagen.id3 import TALB, TIT2, TPE1, TRCK, TXXX
 
 from common import check as chk
 from common.cli import (
-    DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_backup_args, add_check_parser,
-    add_convert_parser, add_queue_arg, add_root_arg, build_parser,
-    run_step,
+    DEFAULT_TMP_DIR, SCANNED_ROOT_HELP, add_check_parser, add_convert_parser,
+    add_dry_run_arg, add_queue_arg, add_root_arg, build_parser, run_step,
 )
 from common.ffmpeg import (
     replace_with, require_ffmpeg, run_ffmpeg, temp_output_path,
 )
 from common.files import (
-    is_ignored, iter_dirs, iter_files, iter_kept, load_mmfignore,
-    maybe_backup, move, rename_target, with_extension,
+    is_ignored, iter_dirs, iter_files, iter_kept, load_mmfignore, move,
+    rename_target, with_extension,
 )
 from common.http import cached
 from common.queue import (
@@ -68,7 +67,9 @@ from common.text import (
     best_fuzzy_match, fuzzy_ratio, leading_int,
     render_filename as render_template, should_replace,
 )
-from common.ui import missing_package, note, warn, warn_missing_file
+from common.ui import (
+    missing_package, note, outcome, report, warn, warn_missing_file,
+)
 
 # "artists" needs registering for mp3/m4a; other formats take any key.
 EasyID3.RegisterTXXXKey("artists", "ARTISTS")
@@ -374,7 +375,7 @@ def queue_album_art(root, art_dir, filename, contact):
         download_album_art(artist_name, album_name, dest_dir, filename)
 
 
-def apply_album_art(root, art_dir):
+def apply_album_art(root, art_dir, dry_run=False):
     """Copy queued art onto matching albums in root. Returns the
     number of files copied."""
     root = Path(root)
@@ -389,17 +390,18 @@ def apply_album_art(root, art_dir):
             if not dest_dir.is_dir():
                 warn(f"No matching album for queued art: {album_dir}")
             elif not is_ignored(spec, root, dest_dir):
-                applied += copy_files(album_dir, dest_dir)
+                applied += copy_files(album_dir, dest_dir, dry_run)
     return applied
 
 
-def copy_files(src_dir, dest_dir):
+def copy_files(src_dir, dest_dir, dry_run):
     """Copy every file in `src_dir` into `dest_dir`; returns the
     count."""
     files = iter_files(src_dir)
     for src in files:
-        shutil.copyfile(src, dest_dir / src.name)
-        print(f"Album art applied: {dest_dir / src.name}")
+        if not dry_run:
+            shutil.copyfile(src, dest_dir / src.name)
+        report("copy", dest_dir / src.name, dry_run)
     return len(files)
 
 
@@ -690,11 +692,11 @@ def write_track_fields(path, fields):
 def run_apply(args):
     root = Path(args.root)
     verify_queue_root(args.queue, root)
-    maybe_backup(args, root)
-    apply_queue(root, args.queue, write_track_fields)
-    art_applied = apply_album_art(root, args.art_dir)
-    if art_applied:
-        print(f"{art_applied} album art file(s) applied.")
+    apply_queue(root, args.queue, write_track_fields, args.dry_run)
+    art_copied = apply_album_art(root, args.art_dir, args.dry_run)
+    if art_copied:
+        print(f"{art_copied} album art file(s) "
+              f"{outcome('copy', args.dry_run)}.")
 
 
 # ---------------------------------------------------------------------------
@@ -722,15 +724,12 @@ def run_normalize(args):
     """Normalize every track's loudness with ffmpeg's loudnorm."""
     if not require_ffmpeg("normalize loudness"):
         return
-    root = Path(args.root)
-    maybe_backup(args, root)
     filter_arg = f"loudnorm=I={args.lufs}:TP=-1.5:LRA=11"
-
-    def normalize(path):
-        reencode(path, filter_arg=filter_arg)
-        return path
-
-    process_each(iter_music_files(root), normalize, "normalize", "track")
+    process_each(
+        iter_music_files(args.root), str,
+        lambda path: reencode(path, filter_arg=filter_arg),
+        "normalize", "track", args.dry_run,
+    )
 
 
 def run_convert(args):
@@ -743,21 +742,19 @@ def run_convert(args):
     from_ext, to_ext = exts
     if from_ext not in AUDIO_EXTENSIONS:
         warn(f"{from_ext} isn't a recognized audio extension.")
-    root = Path(args.root)
-    maybe_backup(args, root)
-
-    def convert(path):
-        return f"{path.name} -> {reencode(path, new_suffix=to_ext).name}"
-
-    paths = with_extension(iter_music_files(root), from_ext)
-    process_each(paths, convert, "convert", "track")
+    process_each(
+        with_extension(iter_music_files(args.root), from_ext),
+        lambda path: f"{path.name} -> {path.with_suffix(to_ext).name}",
+        lambda path: reencode(path, new_suffix=to_ext),
+        "convert", "track", args.dry_run,
+    )
 
 
 # ---------------------------------------------------------------------------
 # rename
 # ---------------------------------------------------------------------------
 
-def run_rename(root, template):
+def run_rename(root, template, dry_run=False):
     """Rename every file under root from its tags via `template`."""
     for path in iter_music_files(root):
         handle = load_track(path)
@@ -767,12 +764,11 @@ def run_rename(root, template):
         new_name = render_filename(template, path, get_tags(handle))
         new_path = rename_target(path, new_name)
         if new_path:
-            move(path, new_path)
+            move(path, new_path, dry_run)
 
 
 def run_rename_step(args):
-    maybe_backup(args, Path(args.root))
-    run_rename(args.root, args.template)
+    run_rename(args.root, args.template, args.dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +922,7 @@ def add_apply_args(subparsers):
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
     add_art_dir_arg(apply_p, "Where scan saved album art")
-    add_backup_args(apply_p)
+    add_dry_run_arg(apply_p)
 
 
 def add_normalize_args(subparsers):
@@ -938,7 +934,7 @@ def add_normalize_args(subparsers):
         "--lufs", type=float, default=-16.0,
         help="Target loudness in LUFS (default: %(default)s)",
     )
-    add_backup_args(normalize_p)
+    add_dry_run_arg(normalize_p)
 
 
 def add_convert_args(subparsers):
@@ -958,7 +954,7 @@ def add_rename_args(subparsers):
         help="e.g. '%%num - %%title'. Placeholders: %%num, %%title, "
              "%%artist, %%features (featured artists), %%album, %%ext.",
     )
-    add_backup_args(rename_p)
+    add_dry_run_arg(rename_p)
 
 
 def build_arg_parser():

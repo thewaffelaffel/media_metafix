@@ -1,13 +1,12 @@
-"""Backups, apply's safety checks, scan errors and ffmpeg failures."""
-
-import tarfile
-from argparse import Namespace
+"""Dry runs, apply's safety checks, scan errors and ffmpeg failures."""
 
 import pytest
 
 from common.ffmpeg import run_ffmpeg
-from common.files import create_backup, maybe_backup
+from common.files import move
 from common.queue import apply_queue, scan_one_file
+from common.steps import process_each
+from common.ui import past_tense
 from conftest import needs_ffmpeg, write_queue
 
 
@@ -19,27 +18,49 @@ def make_library(root):
     return root
 
 
-@pytest.mark.parametrize("compress, suffix", [
-    (True, ".tar.gz"), (False, ".tar"),
-])
-def test_create_backup_skips_ignored(tmp_path, compress, suffix):
-    root = make_library(tmp_path / "lib")
-    backup = create_backup(root, tmp_path / "tmp", compress)
-    assert backup.parent == tmp_path / "tmp" / "backups"
-    assert backup.name.startswith("lib-")
-    assert backup.name.endswith(suffix)
-    with tarfile.open(backup) as tar:
-        assert sorted(tar.getnames()) == [".mmfignore", "A/B/1.mkv",
-                                          "A/B/2.mkv"]
-        assert tar.extractfile("A/B/1.mkv").read() == b"A/B/1.mkv"
+def test_past_tense():
+    assert [past_tense(v) for v in ("convert", "normalize", "apply")] == \
+        ["converted", "normalized", "applied"]
 
 
-def test_maybe_backup_honors_no_backup(tmp_path):
-    root = make_library(tmp_path / "lib")
-    maybe_backup(Namespace(no_backup=True, tmp_dir=tmp_path / "t"), root)
-    assert not (tmp_path / "t").exists()
-    maybe_backup(Namespace(no_backup=False, tmp_dir=tmp_path / "t"), root)
-    assert len(list((tmp_path / "t" / "backups").iterdir())) == 1
+def test_process_each(tmp_path, capsys):
+    paths = [tmp_path / "a", tmp_path / "b"]
+    done = []
+
+    def perform(path):
+        if path.name == "b":
+            raise RuntimeError("boom")
+        done.append(path.name)
+
+    counts = process_each(paths, lambda p: p.name, perform, "convert",
+                          "file")
+    assert done == ["a"]
+    assert (counts["done"], counts["error"]) == (1, 1)
+    out, err = capsys.readouterr()
+    assert "Converted: a" in out
+    assert "1 file(s) converted, 1 error(s)." in out
+    assert "Failed to convert" in err
+
+
+def test_process_each_dry_run(tmp_path, capsys):
+    def perform(_path):
+        raise AssertionError("dry run performed work")
+
+    process_each([tmp_path / "a"], lambda p: p.name, perform, "convert",
+                 "file", dry_run=True)
+    out = capsys.readouterr().out
+    assert "Would convert: a" in out
+    assert "1 file(s) would be converted, 0 error(s)." in out
+
+
+def test_move_dry_run(tmp_path, capsys):
+    path = tmp_path / "old.mkv"
+    path.touch()
+    move(path, tmp_path / "new.mkv", dry_run=True)
+    assert path.exists()
+    assert "Would rename: old.mkv -> new.mkv" in capsys.readouterr().out
+    move(path, tmp_path / "new.mkv")
+    assert (tmp_path / "new.mkv").exists() and not path.exists()
 
 
 def test_apply_queue_skips_ignored_missing_and_failures(tmp_path, capsys):
@@ -65,6 +86,22 @@ def test_apply_queue_skips_ignored_missing_and_failures(tmp_path, capsys):
     assert "Ignored by .mmfignore, skipping" in err
     assert "File not found" in err
     assert "disk on fire" in err
+
+
+def test_apply_queue_dry_run(tmp_path, capsys):
+    root = make_library(tmp_path / "lib")
+    queue = write_queue(tmp_path / "q.yml",
+                        "A/B/1.mkv: {title: One, year: null}\n")
+
+    def write_fields(_path, _fields):
+        raise AssertionError("dry run wrote")
+
+    counts = apply_queue(root, queue, write_fields, dry_run=True)
+    assert counts["applied"] == 1
+    out = capsys.readouterr().out
+    assert f"Would apply: {root / 'A/B/1.mkv'}\n  title: One\n" in out
+    assert "year" not in out
+    assert "1 would be applied" in out
 
 
 def test_scan_one_file_outcomes(tmp_path, capsys):

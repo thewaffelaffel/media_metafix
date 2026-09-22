@@ -11,9 +11,9 @@ numbers come from TVmaze; movie titles and years from TMDB, falling
 back to the filename.
 
 scan only queues changes (tmp/changes.yml by default, relative to the
-current directory, not root). Steps that modify files back root up to
-tmp/backups first unless --no-backup is given. A ".mmfignore" file in
-root (".gitignore" syntax) excludes matches from every step.
+current directory, not root). Steps that modify files take --dry-run
+to print what they'd change instead. A ".mmfignore" file in root
+(".gitignore" syntax) excludes matches from every step.
 
 See README.md for setup and examples.
 """
@@ -29,7 +29,7 @@ from urllib.error import HTTPError, URLError
 
 from common import check as chk
 from common.cli import (
-    SCANNED_ROOT_HELP, add_backup_args, add_check_parser, add_convert_parser,
+    SCANNED_ROOT_HELP, add_check_parser, add_convert_parser, add_dry_run_arg,
     add_queue_arg, add_root_arg, build_parser, run_step,
 )
 from common.ffmpeg import (
@@ -37,8 +37,8 @@ from common.ffmpeg import (
     temp_output_path,
 )
 from common.files import (
-    iter_dirs, iter_files, iter_kept, load_mmfignore, maybe_backup, move,
-    rename_target, with_extension,
+    iter_dirs, iter_files, iter_kept, load_mmfignore, move, rename_target,
+    with_extension,
 )
 from common.http import cached, fetch, fetch_json
 from common.queue import (
@@ -50,7 +50,7 @@ from common.text import (
     FUZZY_SAME_ENOUGH, best_fuzzy_match, fuzzy_ratio, leading_int,
     render_filename, should_replace,
 )
-from common.ui import note, warn, warn_missing_file
+from common.ui import note, outcome, report, warn, warn_missing_file
 
 USER_AGENT = "tv-metafix v0.1"
 
@@ -560,8 +560,7 @@ def run_fingerprint(args):
 def run_apply(args):
     root = Path(args.root)
     verify_queue_root(args.queue, root)
-    maybe_backup(args, root, compress=False)
-    apply_queue(root, args.queue, write_tags)
+    apply_queue(root, args.queue, write_tags, args.dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -674,8 +673,9 @@ def save_subtitle(path, data, lang):
     return path
 
 
-def caption_one_file(client, root, path, lang):
-    """"present", "missing", "captioned" or "error" for one file."""
+def caption_one_file(client, root, path, lang, dry_run=False):
+    """"present", "missing", "captioned" or "error" for one file. A
+    dry run searches but doesn't download (downloads are limited)."""
     try:
         if has_subtitles(path, lang):
             return "present"
@@ -683,12 +683,13 @@ def caption_one_file(client, root, path, lang):
         if file_id is None:
             warn(f"No {lang} subtitles found for {path}")
             return "missing"
-        dest = save_subtitle(path, client.download(file_id), lang)
+        if not dry_run:
+            path = save_subtitle(path, client.download(file_id), lang)
     except (HTTPError, URLError, OSError, RuntimeError, KeyError,
             ValueError) as exc:
         warn(f"Failed to caption {path}: {exc}")
         return "error"
-    print(f"Captioned: {dest}")
+    report("caption", path, dry_run)
     return "captioned"
 
 
@@ -701,15 +702,14 @@ def run_caption(args):
     if client is None:
         return
     root = Path(args.root)
-    maybe_backup(args, root, compress=False)
     counts = Counter(
-        caption_one_file(client, root, path, args.lang)
+        caption_one_file(client, root, path, args.lang, args.dry_run)
         for path in iter_videos(root)
     )
     print(
-        f"\n{counts['captioned']} captioned, {counts['present']} already "
-        f"had subtitles, {counts['missing']} not found, "
-        f"{counts['error']} error(s)."
+        f"\n{counts['captioned']} {outcome('caption', args.dry_run)}, "
+        f"{counts['present']} already had subtitles, {counts['missing']} "
+        f"not found, {counts['error']} error(s)."
     )
 
 
@@ -735,14 +735,12 @@ def run_convert(args):
     if exts is None:
         return
     from_ext, to_ext = exts
-    root = Path(args.root)
-    maybe_backup(args, root, compress=False)
-
-    def convert(path):
-        return f"{path.name} -> {convert_file(path, to_ext).name}"
-
-    paths = with_extension(iter_videos(root), from_ext)
-    process_each(paths, convert, "convert", "file")
+    process_each(
+        with_extension(iter_videos(args.root), from_ext),
+        lambda path: f"{path.name} -> {path.with_suffix(to_ext).name}",
+        lambda path: convert_file(path, to_ext),
+        "convert", "file", args.dry_run,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -770,16 +768,16 @@ def sidecar_subtitles(path):
     return path.parent.glob(f"{glob.escape(path.stem)}.*.srt")
 
 
-def rename_file(path, template):
+def rename_file(path, template, dry_run=False):
     """Rename `path` (and its sidecar subtitles) from its tags."""
     values = template_values(path, read_tags(path))
     new_path = rename_target(path, render_filename(template, path, values))
     if new_path is None:
         return
-    for sidecar in sidecar_subtitles(path):
+    for sidecar in list(sidecar_subtitles(path)):
         lang_suffix = sidecar.name[len(path.stem):]
-        sidecar.rename(path.with_name(new_path.stem + lang_suffix))
-    move(path, new_path)
+        move(sidecar, path.with_name(new_path.stem + lang_suffix), dry_run)
+    move(path, new_path, dry_run)
 
 
 def run_rename(args):
@@ -788,12 +786,11 @@ def run_rename(args):
         note("give --episodes and/or --movies -- nothing to do.")
         return
     root = Path(args.root)
-    maybe_backup(args, root, compress=False)
     for path in iter_videos(root):
         kind = kind_of(path.relative_to(root))
         template = args.episodes if kind == "episode" else args.movies
         if template:
-            rename_file(path, template)
+            rename_file(path, template, args.dry_run)
 
 
 # ---------------------------------------------------------------------------
@@ -944,7 +941,7 @@ def add_apply_args(subparsers):
     )
     add_root_arg(apply_p, SCANNED_ROOT_HELP)
     add_queue_arg(apply_p, "Queue file to apply")
-    add_backup_args(apply_p)
+    add_dry_run_arg(apply_p)
 
 
 def add_caption_args(subparsers):
@@ -957,7 +954,7 @@ def add_caption_args(subparsers):
         help="Two-letter subtitle language (default: %(default)s)",
     )
     add_opensubtitles_args(caption_p, login=True)
-    add_backup_args(caption_p)
+    add_dry_run_arg(caption_p)
 
 
 def add_convert_args(subparsers):
@@ -982,7 +979,7 @@ def add_rename_args(subparsers):
         help="Movie template, e.g. '%%title (%%year)'. Placeholders: "
              "%%series, %%title, %%year, %%ext.",
     )
-    add_backup_args(rename_p)
+    add_dry_run_arg(rename_p)
 
 
 def build_arg_parser():

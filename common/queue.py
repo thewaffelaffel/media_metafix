@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from .files import is_ignored, load_mmfignore
-from .ui import warn, warn_missing_file
+from .ui import outcome, report, warn, warn_missing_file
 
 ROOT_HEADER_RE = re.compile(r"^#\s*root:\s*(.+?)\s*$")
 
@@ -71,15 +71,22 @@ def write_queue_header(queue_f, args, kind):
     queue_f.flush()
 
 
+def field_lines(fields, previous=None):
+    """Queue lines for `fields`, with "# was:" comments from
+    `previous`."""
+    lines = []
+    for key, value in fields.items():
+        line = f"  {key}: {render_yaml_scalar(value)}"
+        if previous and previous.get(key):
+            line += f"  # was: {render_yaml_scalar(previous[key])}"
+        lines.append(line)
+    return lines
+
+
 def write_queue_entry(queue_f, file, fields, previous):
     """Print one entry and append it to the queue, fsynced so a crash
     keeps prior results."""
-    lines = [f"{render_yaml_scalar(file)}:"]
-    for key, value in fields.items():
-        line = f"  {key}: {render_yaml_scalar(value)}"
-        if previous.get(key):
-            line += f"  # was: {render_yaml_scalar(previous[key])}"
-        lines.append(line)
+    lines = [f"{render_yaml_scalar(file)}:", *field_lines(fields, previous)]
     entry = "\n".join(lines) + "\n"
     print(entry, end="")
     queue_f.write(entry)
@@ -156,9 +163,16 @@ def verify_queue_root(queue_file, root):
         sys.exit(1)
 
 
-def apply_one_file(root, spec, file, fields, write_fields):
-    """`write_fields(path, fields)` for one entry. Returns "applied",
-    "ignored" or "error"."""
+def preview_fields(path, fields):
+    """Print the non-null `fields` a dry-run apply would write."""
+    report("apply", path, dry_run=True)
+    set_fields = {k: v for k, v in fields.items() if v is not None}
+    print("\n".join(field_lines(set_fields)))
+
+
+def apply_one_file(root, spec, file, fields, write_fields, dry_run):
+    """`write_fields(path, fields)` for one entry, unless `dry_run`.
+    Returns "applied", "ignored" or "error"."""
     path = root / file
     if is_ignored(spec, root, path):
         warn(f"Ignored by .mmfignore, skipping: {path}")
@@ -166,24 +180,29 @@ def apply_one_file(root, spec, file, fields, write_fields):
     if not path.exists():
         warn_missing_file(path)
         return "error"
+    if dry_run:
+        preview_fields(path, fields)
+        return "applied"
     try:
         write_fields(path, fields)
     except Exception as exc:
         warn(f"Failed to apply changes to {path}: {exc}")
         return "error"
-    print(f"Applied: {path}")
+    report("apply", path, dry_run)
     return "applied"
 
 
-def apply_queue(root, queue_file, write_fields):
+def apply_queue(root, queue_file, write_fields, dry_run=False):
     """Apply every entry of `queue_file` via `write_fields`."""
     root = Path(root)
     spec = load_mmfignore(root)
     counts = Counter()
     for file, fields in load_queue(queue_file).items():
-        counts[apply_one_file(root, spec, file, fields, write_fields)] += 1
+        counts[apply_one_file(
+            root, spec, file, fields, write_fields, dry_run,
+        )] += 1
     print(
-        f"\nDone. {counts['applied']} applied, {counts['error']} errors, "
-        f"{counts['ignored']} ignored."
+        f"\n{counts['applied']} {outcome('apply', dry_run)}, "
+        f"{counts['error']} errors, {counts['ignored']} ignored."
     )
     return counts
