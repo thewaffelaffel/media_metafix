@@ -63,21 +63,6 @@ def build_queue_fields(current, updates, keys, coerce=None):
     return fields, previous
 
 
-def render_queue_entry(file, fields, previous):
-    """One entry exactly as it's written to the queue."""
-    lines = [f"{render_yaml_scalar(file)}:"]
-    for key, value in fields.items():
-        line = f"  {key}: {render_yaml_scalar(value)}"
-        if previous.get(key):
-            line += f"  # was: {render_yaml_scalar(previous[key])}"
-        lines.append(line)
-    return "\n".join(lines) + "\n"
-
-
-def print_change(file, fields, previous):
-    print(render_queue_entry(file, fields, previous), end="")
-
-
 def write_queue_header(queue_f, args, kind):
     queue_f.write(f"# root: {Path(args.root).resolve()}\n")
     queue_f.write(QUEUE_HEADER.format(
@@ -87,8 +72,17 @@ def write_queue_header(queue_f, args, kind):
 
 
 def write_queue_entry(queue_f, file, fields, previous):
-    """Append one entry, fsynced so a crash keeps prior results."""
-    queue_f.write(render_queue_entry(file, fields, previous))
+    """Print one entry and append it to the queue, fsynced so a crash
+    keeps prior results."""
+    lines = [f"{render_yaml_scalar(file)}:"]
+    for key, value in fields.items():
+        line = f"  {key}: {render_yaml_scalar(value)}"
+        if previous.get(key):
+            line += f"  # was: {render_yaml_scalar(previous[key])}"
+        lines.append(line)
+    entry = "\n".join(lines) + "\n"
+    print(entry, end="")
+    queue_f.write(entry)
     queue_f.flush()
     os.fsync(queue_f.fileno())
 
@@ -105,7 +99,6 @@ def scan_one_file(queue_f, compute, path):
         print(f"{path}: OK")
         return "ok"
     file, fields, previous = entry
-    print_change(file, fields, previous)
     write_queue_entry(queue_f, file, fields, previous)
     return "queued"
 
