@@ -7,44 +7,15 @@ either a show or a movie series (a root may mix both):
     <root>/<series>/<title>.<ext>             movies
 
 Folder names are trusted for show/season and series. Episode titles and
-numbers come from TVmaze (free, no key); movie titles and years from
-TMDB (free key), falling back to the filename.
+numbers come from TVmaze; movie titles and years from TMDB, falling
+back to the filename.
 
-Steps:
-
-    scan <root> [queue]         Look up metadata; queue changes to YAML.
-    check [queue]               Flag suspicious queue entries, prompting
-                                for how to resolve each.
-    fingerprint <root> [queue]  Compare queued entries with what
-                                OpenSubtitles knows about each file's
-                                hash. Prints mismatches, no prompts.
-    apply <root> [queue]        Write queued metadata to disk.
-    caption <root>              Download subtitles from OpenSubtitles
-                                and embed them.
-    convert <root> <from> <to>  Remux files to another container.
-    rename <root>               Rename files from their tags.
-
-[queue] defaults to tmp/changes.yml (tmp is relative to the current
-directory, not root). apply/caption/convert/rename back root up to
+scan only queues changes (tmp/changes.yml by default, relative to the
+current directory, not root). Steps that modify files back root up to
 tmp/backups first unless --no-backup is given. A ".mmfignore" file in
 root (".gitignore" syntax) excludes matches from every step.
 
-Setup:
-    sudo apt install ffmpeg
-    pip install pyyaml pathspec
-    export TMF_TMDB_API_KEY=...           # themoviedb.org/settings/api
-    export TMF_OPENSUBTITLES_API_KEY=...  # opensubtitles.com/consumers
-    # Optional, raises the daily subtitle download limit:
-    export TMF_OPENSUBTITLES_USERNAME=... TMF_OPENSUBTITLES_PASSWORD=...
-
-Usage:
-    tv_metafix scan /videos
-    tv_metafix check
-    tv_metafix fingerprint /videos
-    tv_metafix apply /videos
-    tv_metafix caption /videos --lang en
-    tv_metafix convert /videos avi mkv
-    tv_metafix rename /videos --episodes "S%season E%episode - %title"
+See README.md for setup and examples.
 """
 
 import glob

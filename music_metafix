@@ -8,38 +8,12 @@ come from MusicBrainz, matched by the filename's track number or else
 its title. A recording's full credit (main + featured artists) goes in
 a separate "artists" tag; "artist" stays as the folder name.
 
-Steps:
-
-    scan <root> [queue]         Search MusicBrainz; queue changes to YAML
-                                and download album art for review.
-    check [queue]               Flag suspicious queue entries, prompting
-                                for how to resolve each.
-    fingerprint <root> [queue]  Check queued titles against AcoustID.
-                                Prints mismatches, no prompts.
-    apply <root> [queue]        Write queued metadata and art to disk.
-    normalize <root>            Normalize every track's loudness.
-    convert <root> <from> <to>  Re-encode files, keeping their tags.
-    rename <root> <template>    Rename files from their tags.
-
-[queue] defaults to tmp/changes.yml (tmp is relative to the current
-directory, not root). apply/normalize/convert/rename back root up to
+scan only queues changes (tmp/changes.yml by default, relative to the
+current directory, not root). Steps that modify files back root up to
 tmp/backups first unless --no-backup is given. A ".mmfignore" file in
 root (".gitignore" syntax) excludes matches from every step.
 
-Setup:
-    sudo apt install ffmpeg libchromaprint-tools
-    pip install mutagen pyacoustid musicbrainzngs pyyaml pillow pathspec
-    export MMF_ACOUSTID_API_KEY=...   # acoustid.org/new-application
-    export MMF_MUSICBRAINZ_CONTACT=you@example.com
-
-Usage:
-    music_metafix scan /music [--no-art]
-    music_metafix check
-    music_metafix fingerprint /music
-    music_metafix apply /music
-    music_metafix normalize /music
-    music_metafix convert /music wma mp3
-    music_metafix rename /music "%num - %title (feat. %features)"
+See README.md for setup and examples.
 """
 
 import io
